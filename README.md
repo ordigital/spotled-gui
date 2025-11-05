@@ -8,6 +8,7 @@ Desktop editor for SpotLED animations built with PySide6. The app lets you creat
 - Pixel editor with drawing, erasing, clearing, and whole-frame shifting tools.
 - Frame timeline with add/remove, previous/next navigation, and copy-from-previous shortcuts.
 - Undo/redo history per frame for quick corrections.
+- PNG monochrome image importing.
 - Animation options for built-in SpotLED effects and playback speed.
 - Text mode with optional two-line display and effect controls.
 - Project save/load to JSON files plus direct BLE upload to SpotLED devices.

@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 import json, os, sys, copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize, QRect, Signal, QObject
-from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap
+from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QTabWidget, QSlider, QLineEdit, QMessageBox, QToolButton,
@@ -56,6 +56,8 @@ class PixelGrid(QWidget):
     changed = Signal()  # signal emitted when a pixel changes
     action_started = Signal()
     action_finished = Signal()
+    placement_confirmed = Signal()
+    placement_canceled = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -70,6 +72,16 @@ class PixelGrid(QWidget):
         self._shift_start_cell = None
         self._shift_source = None
         self._shift_last_delta = (0, 0)
+        self._placement_active = False
+        self._placement_pixels: Optional[List[List[bool]]] = None
+        self._placement_width = 0
+        self._placement_height = 0
+        self._placement_offset = (0, 0)
+        self._placement_drag_start = None
+        self._placement_offset_start = (0, 0)
+        self._placement_dragged = False
+        self._placement_base: Optional[List[List[bool]]] = None
+        self._update_cursor()
 
     def sizeHint(self) -> QSize:
         return QSize(GRID_W * CELL + 1, GRID_H * CELL + 1)
@@ -79,6 +91,7 @@ class PixelGrid(QWidget):
         if self.tool != Tool.SHIFT:
             self._shift_source = None
             self._shift_last_delta = (0, 0)
+        self._update_cursor()
         self.update()
 
     def clearAll(self):
@@ -90,6 +103,12 @@ class PixelGrid(QWidget):
 
     def setPixels(self, pxs: List[List[bool]]):
         # deep copy so editing does not mutate the source list
+        if self._placement_active:
+            self._placement_active = False
+            self._placement_pixels = None
+            self._placement_base = None
+            self.placement_canceled.emit()
+            self._update_cursor()
         self.px = copy.deepcopy(pxs)
         self.update()
 
@@ -101,6 +120,8 @@ class PixelGrid(QWidget):
         return copy.deepcopy(self.px)
 
     def _apply_at(self, x, y):
+        if self._placement_active:
+            return
         if 0 <= x < GRID_W and 0 <= y < GRID_H:
             val = (self.tool == Tool.DRAW)
             if self.px[y][x] != val:
@@ -110,6 +131,14 @@ class PixelGrid(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
+            if self._placement_active:
+                self._mouse_down = True
+                cell_x = int(e.position().x() // CELL)
+                cell_y = int(e.position().y() // CELL)
+                self._placement_drag_start = (cell_x, cell_y)
+                self._placement_offset_start = self._placement_offset
+                self._placement_dragged = False
+                return
             self._mouse_down = True
             if not self._action_active:
                 self._action_active = True
@@ -124,6 +153,21 @@ class PixelGrid(QWidget):
                 self._apply_at(x, y)
 
     def mouseMoveEvent(self, e):
+        if self._placement_active:
+            if self._mouse_down and self._placement_drag_start is not None:
+                x = int(e.position().x() // CELL)
+                y = int(e.position().y() // CELL)
+                dx = x - self._placement_drag_start[0]
+                dy = y - self._placement_drag_start[1]
+                if dx or dy:
+                    self._placement_dragged = True
+                self._set_placement_offset(
+                    self._placement_offset_start[0] + dx,
+                    self._placement_offset_start[1] + dy
+                )
+                self.update()
+            return
+
         if self._mouse_down:
             x = int(e.position().x() // CELL)
             y = int(e.position().y() // CELL)
@@ -136,6 +180,11 @@ class PixelGrid(QWidget):
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
+            if self._placement_active:
+                self._mouse_down = False
+                if not self._placement_dragged:
+                    self.placement_confirmed.emit()
+                return
             self._mouse_down = False
             if self._action_active:
                 self._action_active = False
@@ -145,6 +194,8 @@ class PixelGrid(QWidget):
             self._shift_last_delta = (0, 0)
 
     def _apply_shift(self, dx, dy):
+        if self._placement_active:
+            return
         if self._shift_source is None:
             return
         if (dx, dy) == self._shift_last_delta:
@@ -162,6 +213,89 @@ class PixelGrid(QWidget):
         self.update()
         self.changed.emit()
 
+    def startPlacement(self, pixels: List[List[bool]]):
+        if not pixels or not pixels[0]:
+            return
+        self._placement_pixels = copy.deepcopy(pixels)
+        self._placement_height = len(pixels)
+        self._placement_width = len(pixels[0])
+        self._placement_active = True
+        self._mouse_down = False
+        self._placement_base = self.getPixelsCopy()
+        ox = (GRID_W - self._placement_width) // 2
+        oy = (GRID_H - self._placement_height) // 2
+        self._set_placement_offset(ox, oy)
+        self._placement_drag_start = None
+        self._placement_offset_start = self._placement_offset
+        self._placement_dragged = False
+        self._update_cursor()
+        self.update()
+
+    def finalizePlacement(self) -> Optional[List[List[bool]]]:
+        if not self._placement_active:
+            return None
+        frame = self._compose_placement_frame()
+        self._placement_active = False
+        self._placement_pixels = None
+        self._placement_drag_start = None
+        self._placement_dragged = False
+        self._placement_base = None
+        self.px = copy.deepcopy(frame)
+        self.update()
+        self.changed.emit()
+        self._update_cursor()
+        return frame
+
+    def isPlacementActive(self) -> bool:
+        return self._placement_active
+
+    def _compose_placement_frame(self) -> List[List[bool]]:
+        base = self._placement_base if self._placement_base is not None else self.getPixelsCopy()
+        frame = copy.deepcopy(base)
+        if self._placement_pixels is None:
+            return frame
+        offset_x, offset_y = self._placement_offset
+        for y in range(self._placement_height):
+            for x in range(self._placement_width):
+                gx = x + offset_x
+                gy = y + offset_y
+                if 0 <= gx < GRID_W and 0 <= gy < GRID_H:
+                    frame[gy][gx] = self._placement_pixels[y][x]
+        return frame
+
+    def _placement_pixel_at(self, x: int, y: int) -> bool:
+        if self._placement_base is not None and 0 <= y < len(self._placement_base) and 0 <= x < len(self._placement_base[0]):
+            base_val = self._placement_base[y][x]
+        else:
+            base_val = self.px[y][x]
+        if not self._placement_active or self._placement_pixels is None:
+            return base_val
+        offset_x, offset_y = self._placement_offset
+        ix = x - offset_x
+        iy = y - offset_y
+        if 0 <= ix < self._placement_width and 0 <= iy < self._placement_height:
+            return self._placement_pixels[iy][ix]
+        return base_val
+
+    def _set_placement_offset(self, offset_x: int, offset_y: int):
+        if self._placement_pixels is None:
+            return
+        min_x, max_x = self._placement_offset_limits(self._placement_width, GRID_W)
+        min_y, max_y = self._placement_offset_limits(self._placement_height, GRID_H)
+        clamped_x = max(min(offset_x, max_x), min_x)
+        clamped_y = max(min(offset_y, max_y), min_y)
+        self._placement_offset = (clamped_x, clamped_y)
+
+    @staticmethod
+    def _placement_offset_limits(image_size: int, grid_size: int) -> Tuple[int, int]:
+        return -image_size + 1, grid_size - 1
+
+    def _update_cursor(self):
+        if self._placement_active or self.tool == Tool.SHIFT:
+            self.setCursor(Qt.SizeAllCursor)
+        else:
+            self.unsetCursor()
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.fillRect(self.rect(), QBrush(Qt.black))
@@ -171,12 +305,13 @@ class PixelGrid(QWidget):
         if self.prev_px:
             for y in range(GRID_H):
                 for x in range(GRID_W):
-                    if self.prev_px[y][x] and not self.px[y][x]:
+                    cur_val = self._placement_pixel_at(x, y)
+                    if self.prev_px[y][x] and not cur_val:
                         p.fillRect(x*CELL+1, y*CELL+1, CELL-1, CELL-1, overlay_brush)
         # pixels
         for y in range(GRID_H):
             for x in range(GRID_W):
-                if self.px[y][x]:
+                if self._placement_pixel_at(x, y):
                     p.fillRect(x*CELL+1, y*CELL+1, CELL-1, CELL-1, pixel_brush)
         # grid lines
         pen = QPen()
@@ -228,6 +363,8 @@ class Main(QMainWindow):
         self.grid.changed.connect(self._grid_changed)
         self.grid.action_started.connect(self._grid_action_started)
         self.grid.action_finished.connect(self._grid_action_finished)
+        self.grid.placement_confirmed.connect(self._placement_confirmed)
+        self.grid.placement_canceled.connect(self._placement_canceled)
         img_h.addWidget(self.grid)
 
         self._history: List[dict] = []
@@ -269,11 +406,13 @@ class Main(QMainWindow):
         self.btn_remove = QToolButton(); self.btn_remove.setText("🗑️")
         self.btn_copy_prev = QToolButton(); self.btn_copy_prev.setText("📄")
         self.btn_copy_prev.setToolTip("Kopiuj poprzednią klatkę")
+        self.btn_import_png = QToolButton(); self.btn_import_png.setText("🖼️")
+        self.btn_import_png.setToolTip("Importuj klatkę z PNG")
         self.btn_undo = QToolButton(); self.btn_undo.setText("↩️")
         self.btn_undo.setToolTip("Cofnij")
         self.btn_redo = QToolButton(); self.btn_redo.setText("↪️")
         self.btn_redo.setToolTip("Ponów")
-        for b in (self.btn_prev, self.btn_next, self.btn_add, self.btn_remove, self.btn_copy_prev, self.btn_undo, self.btn_redo):
+        for b in (self.btn_prev, self.btn_next, self.btn_add, self.btn_remove, self.btn_copy_prev, self.btn_import_png, self.btn_undo, self.btn_redo):
             b.setFixedSize(64, 64)
             b.setStyleSheet("font-size:24px;")
 
@@ -284,6 +423,7 @@ class Main(QMainWindow):
         self.btn_add.clicked.connect(self._add_frame)
         self.btn_remove.clicked.connect(self._remove_current_frame)
         self.btn_copy_prev.clicked.connect(self._copy_from_previous_frame)
+        self.btn_import_png.clicked.connect(self._import_image_frame)
         self.btn_undo.clicked.connect(self._undo)
         self.btn_redo.clicked.connect(self._redo)
 
@@ -292,6 +432,7 @@ class Main(QMainWindow):
         frames_row.addWidget(self.btn_add)
         frames_row.addWidget(self.btn_remove)
         frames_row.addWidget(self.btn_copy_prev)
+        frames_row.addWidget(self.btn_import_png)
         frames_row.addWidget(self.btn_undo)
         frames_row.addWidget(self.btn_redo)
         frames_row.addStretch(1)
@@ -313,7 +454,7 @@ class Main(QMainWindow):
         img_opts.addWidget(lbl_speed_icon_img)
         self.sl_speed_img = QSlider(Qt.Horizontal)
         self.sl_speed_img.setRange(1, 3500)
-        self.sl_speed_img.setSingleStep(50)
+        self.sl_speed_img.setSingleStep(10)
         self.sl_speed_img.setPageStep(100)
         self.sl_speed_img.setValue(100)
         self.lbl_speed_img = QLabel("100")
@@ -494,6 +635,18 @@ class Main(QMainWindow):
     def _grid_action_finished(self):
         self._finish_action()
 
+    def _placement_confirmed(self):
+        self._commit_imported_image()
+
+    def _commit_imported_image(self) -> bool:
+        result = self.grid.finalizePlacement()
+        if result is None:
+            return False
+        prev_ref = self.frames[self.cur-1] if self.cur > 0 else None
+        self.grid.setReferencePixels(prev_ref)
+        self._finish_action()
+        return True
+
     def _begin_action(self, frame_idx: int):
         if self._pending_action_before is None:
             self._pending_action_before = copy.deepcopy(self.frames[frame_idx])
@@ -528,6 +681,9 @@ class Main(QMainWindow):
         self.btn_undo.setEnabled(can_undo)
         self.btn_redo.setEnabled(can_redo)
 
+    def _placement_canceled(self):
+        self._cancel_pending_action()
+
     def _reset_history(self):
         self._history = []
         self._history_pos = 0
@@ -535,12 +691,30 @@ class Main(QMainWindow):
         self._pending_action_frame = None
         self._update_history_buttons()
 
+    def _cancel_pending_action(self):
+        self._pending_action_before = None
+        self._pending_action_frame = None
+
+    def _require_placement_confirmation(self) -> bool:
+        if not self.grid.isPlacementActive():
+            return True
+        QMessageBox.information(
+            self,
+            "Positioning",
+            "Click on a board to set image position."
+        )
+        return False
+
     def _clear_current_grid(self):
+        if not self._require_placement_confirmation():
+            return
         self._begin_action(self.cur)
         self.grid.clearAll()
         self._finish_action()
 
     def _copy_from_previous_frame(self):
+        if not self._require_placement_confirmation():
+            return
         if self.cur == 0:
             return
         self._begin_action(self.cur)
@@ -548,6 +722,44 @@ class Main(QMainWindow):
         self.grid.setReferencePixels(self.frames[self.cur-1])
         self.grid.update()
         self._finish_action()
+
+    def _import_image_frame(self):
+        base_dir = self._project_dir()
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import frame from PNG",
+            base_dir,
+            "PNG Images (*.png)"
+        )
+        if not path:
+            return
+
+        image = QImage(path)
+        if image.isNull():
+            QMessageBox.critical(self, "Import error", "Could not read the PNG file.")
+            return
+
+        self._store_project_dir(os.path.dirname(path))
+
+        image = image.convertToFormat(QImage.Format_ARGB32)
+        width = image.width()
+        height = image.height()
+        pixels = [[False for _ in range(width)] for _ in range(height)]
+
+        for y in range(height):
+            for x in range(width):
+                color = QColor(image.pixel(x, y))
+                if color.alpha() < 128:
+                    continue
+                if color.lightness() >= 128:
+                    pixels[y][x] = True
+
+        if not pixels:
+            QMessageBox.information(self, "Import", "Image is empty.")
+            return
+
+        self._begin_action(self.cur)
+        self.grid.startPlacement(pixels)
 
     def _apply_history_state(self, frame_idx: int, state: List[List[bool]]):
         if not 0 <= frame_idx < len(self.frames):
@@ -558,6 +770,8 @@ class Main(QMainWindow):
         self._refresh_counter()
 
     def _undo(self):
+        if not self._require_placement_confirmation():
+            return
         if self._history_pos == 0:
             return
         self._history_pos -= 1
@@ -568,6 +782,8 @@ class Main(QMainWindow):
         self._update_history_buttons()
 
     def _redo(self):
+        if not self._require_placement_confirmation():
+            return
         if self._history_pos >= len(self._history):
             return
         action = self._history[self._history_pos]
@@ -595,6 +811,9 @@ class Main(QMainWindow):
             self._refresh_counter()
 
     def _add_frame(self):
+        if self.grid.isPlacementActive():
+            if not self._commit_imported_image():
+                return
         self.frames.insert(self.cur+1, [[False]*GRID_W for _ in range(GRID_H)])
         self.cur += 1
         self._load_current_into_grid()
@@ -689,7 +908,7 @@ class Main(QMainWindow):
 
     def _deserialize_frames(self, frames_data: List[List[str]]) -> List[List[List[bool]]]:
         if not frames_data:
-            raise ValueError("Brak danych klatek.")
+            raise ValueError("No frame data.")
         frames: List[List[List[bool]]] = []
         for frame_rows in frames_data:
             if len(frame_rows) != GRID_H:
@@ -703,6 +922,8 @@ class Main(QMainWindow):
         return frames
 
     def _save_project(self):
+        if not self._require_placement_confirmation():
+            return
         base_dir = self._project_dir()
         suggested = os.path.join(base_dir, "spotled_project.json")
         path, _ = QFileDialog.getSaveFileName(
@@ -789,6 +1010,8 @@ class Main(QMainWindow):
 
     # --- Send ---
     def send_current(self):
+        if not self._require_placement_confirmation():
+            return
         if spotled is None:
             QMessageBox.critical(self, "Library missing", "Please install: pip install python-spotled")
             return
