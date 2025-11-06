@@ -4,7 +4,7 @@ import json, os, sys, copy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QSize, QRect, Signal, QObject
+from PySide6.QtCore import Qt, QSize, QRect, Signal, QObject, QTimer, QPointF
 from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -98,6 +98,15 @@ class PixelGrid(QWidget):
         for y in range(GRID_H):
             for x in range(GRID_W):
                 self.px[y][x] = False
+        self.update()
+        self.changed.emit()
+
+    def invertAll(self):
+        if self._placement_active:
+            return
+        for y in range(GRID_H):
+            for x in range(GRID_W):
+                self.px[y][x] = not self.px[y][x]
         self.update()
         self.changed.emit()
 
@@ -352,13 +361,31 @@ class PixelGrid(QWidget):
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SpotLED – Qt6 GUI (frames)")
+        self.setWindowTitle("SpotLED GUI")
         self.cfg = load_cfg()
         self.setWindowIcon(self._build_app_icon())
         self.setFixedSize(self.sizeHint())
         self.setWindowFlag(Qt.MSWindowsFixedSizeDialogHint, True)
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, False)
         self._center_pending = True
+        self._is_playing = False
+        self.play_timer = QTimer(self)
+        self.play_timer.timeout.connect(self._advance_playback)
+        self._base_button_size = 32
+        self.ui_scale = 1.0
+        self._scalable_buttons: List[QToolButton] = []
+        self._button_font_sizes = {}
+        self._button_icon_sizes = {}
+        self._button_base_sizes = {}
+        self._font_widgets = {}
+        self._font_extra_styles = {}
+        self._font_base_heights = {}
+        self._slider_base_heights = {}
+        self._font_scale_factor = 1.0
+        self._slider_scale_factor = 1.0
+        self._current_scale_label = ""
+        self._current_project_path: Optional[str] = None
+        self._update_window_title()
 
         # --- frame model ---
         self.frames: List[List[List[bool]]] = [ [[False]*GRID_W for _ in range(GRID_H)] ]
@@ -369,9 +396,33 @@ class Main(QMainWindow):
         root = QVBoxLayout(cw)
         self.setCentralWidget(cw)
 
+        scale_row = QHBoxLayout()
+        root.addLayout(scale_row)
+        scale_row.addStretch(1)
+        lbl_scale = QLabel("UI scale")
+        self._register_font_scaled(lbl_scale, 16)
+        scale_row.addWidget(lbl_scale)
+        self.cb_ui_scale = QComboBox()
+        self._scale_presets = [
+            ("smallest", 0.82, 0.72, 0.84),
+            ("smaller", 0.88, 0.78, 0.8),
+            ("normal", 0.93, 0.82, 0.4),
+            ("bigger", 1.05, 0.92, 0.85),
+            ("max", 1.18, 1.02, 0.95),
+        ]
+        for label, scale, font_factor, slider_factor in self._scale_presets:
+            self.cb_ui_scale.addItem(label)
+            idx = self.cb_ui_scale.count() - 1
+            self.cb_ui_scale.setItemData(idx, scale, Qt.UserRole)
+            self.cb_ui_scale.setItemData(idx, font_factor, Qt.UserRole + 1)
+            self.cb_ui_scale.setItemData(idx, slider_factor, Qt.UserRole + 2)
+        self.cb_ui_scale.setCurrentIndex(2)
+        self.cb_ui_scale.currentIndexChanged.connect(self._change_ui_scale_preset)
+        self._register_font_scaled(self.cb_ui_scale, 16, base_height=30)
+        scale_row.addWidget(self.cb_ui_scale)
+
         # Tabs
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("QTabBar::tab { font-size:32px; padding:12px 18px; }")
         root.addWidget(self.tabs)
 
         # --- Tab: Image ---
@@ -398,18 +449,17 @@ class Main(QMainWindow):
         self._pending_action_before: Optional[List[List[bool]]] = None
         self._pending_action_frame: Optional[int] = None
 
-        # Tools (2× larger)
+        # Tools
         tools_col = QVBoxLayout()
         img_h.addLayout(tools_col)
 
         self.btn_draw = QToolButton(); self.btn_draw.setText("✏️")
+        self._register_scalable_button(self.btn_draw, font_size=24)
         self.btn_shift = QToolButton(); self.btn_shift.setIcon(self._build_shift_icon())
-        self.btn_shift.setIconSize(QSize(40, 40))
-        self.btn_shift.setToolTip("Przesuń wszystkie piksele")
+        self.btn_shift.setToolTip("Shift all pixels")
+        self._register_scalable_button(self.btn_shift, font_size=24, icon_size=40)
         self.btn_clear = QToolButton(); self.btn_clear.setText("🧹")
-        for b in (self.btn_draw, self.btn_shift, self.btn_clear):
-            b.setFixedSize(64, 64)  # 2× larger
-            b.setStyleSheet("font-size:24px;")
+        self._register_scalable_button(self.btn_clear, font_size=24)
         self.btn_draw.clicked.connect(lambda: self._set_tool(Tool.DRAW))
         self.btn_shift.clicked.connect(lambda: self._set_tool(Tool.SHIFT))
         self.btn_clear.clicked.connect(self._clear_current_grid)
@@ -423,57 +473,81 @@ class Main(QMainWindow):
         frames_row = QHBoxLayout()
         img_v.addLayout(frames_row)
 
+        self.btn_play = QToolButton(); self.btn_play.setIcon(self._build_play_icon())
+        self.btn_play.setToolTip("Odtwarzaj klatki")
+        self._register_scalable_button(self.btn_play, font_size=24, icon_size=40)
         self.btn_prev = QToolButton(); self.btn_prev.setText("⬅️")
+        self._register_scalable_button(self.btn_prev, font_size=24)
         self.btn_next = QToolButton(); self.btn_next.setText("➡️")
+        self._register_scalable_button(self.btn_next, font_size=24)
         self.btn_add  = QToolButton(); self.btn_add.setText("➕")
+        self._register_scalable_button(self.btn_add, font_size=24)
         self.btn_remove = QToolButton(); self.btn_remove.setText("🗑️")
+        self._register_scalable_button(self.btn_remove, font_size=24)
         self.btn_copy_prev = QToolButton(); self.btn_copy_prev.setText("📄")
-        self.btn_copy_prev.setToolTip("Kopiuj poprzednią klatkę")
+        self.btn_copy_prev.setToolTip("Copy previous frame")
+        self._register_scalable_button(self.btn_copy_prev, font_size=24)
+        self.btn_invert = QToolButton(); self.btn_invert.setIcon(self._build_invert_icon())
+        self.btn_invert.setToolTip("Invert pixels")
+        self._register_scalable_button(self.btn_invert, font_size=24, icon_size=40)
         self.btn_import_png = QToolButton(); self.btn_import_png.setText("🖼️")
-        self.btn_import_png.setToolTip("Importuj klatkę z PNG")
+        self.btn_import_png.setToolTip("Import frame from PNG")
+        self._register_scalable_button(self.btn_import_png, font_size=24)
         self.btn_undo = QToolButton(); self.btn_undo.setText("↩️")
-        self.btn_undo.setToolTip("Cofnij")
+        self.btn_undo.setToolTip("Undo")
+        self._register_scalable_button(self.btn_undo, font_size=24)
         self.btn_redo = QToolButton(); self.btn_redo.setText("↪️")
-        self.btn_redo.setToolTip("Ponów")
-        for b in (self.btn_prev, self.btn_next, self.btn_add, self.btn_remove, self.btn_copy_prev, self.btn_import_png, self.btn_undo, self.btn_redo):
-            b.setFixedSize(64, 64)
-            b.setStyleSheet("font-size:24px;")
+        self.btn_redo.setToolTip("Redo")
+        self._register_scalable_button(self.btn_redo, font_size=24)
+        self.sl_frame_nav = QSlider(Qt.Horizontal)
+        self.sl_frame_nav.setRange(1, len(self.frames))
+        self.sl_frame_nav.setSingleStep(1)
+        self.sl_frame_nav.setPageStep(1)
+        self.sl_frame_nav.valueChanged.connect(self._frame_slider_changed)
+        self._register_slider(self.sl_frame_nav, base_height=22)
+        self._frame_slider_sync = False
+        self.sl_frame_nav.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.lbl_counter = QLabel("1/1")
+        self._register_font_scaled(self.lbl_counter, 18)
 
         self.btn_prev.clicked.connect(self._prev_frame)
         self.btn_next.clicked.connect(self._next_frame)
         self.btn_add.clicked.connect(self._add_frame)
         self.btn_remove.clicked.connect(self._remove_current_frame)
         self.btn_copy_prev.clicked.connect(self._copy_from_previous_frame)
+        self.btn_invert.clicked.connect(self._invert_current_grid)
         self.btn_import_png.clicked.connect(self._import_image_frame)
         self.btn_undo.clicked.connect(self._undo)
         self.btn_redo.clicked.connect(self._redo)
+        self.btn_play.clicked.connect(self._toggle_playback)
 
+        frames_row.addWidget(self.btn_play)
         frames_row.addWidget(self.btn_prev)
         frames_row.addWidget(self.btn_next)
         frames_row.addWidget(self.btn_add)
         frames_row.addWidget(self.btn_remove)
         frames_row.addWidget(self.btn_copy_prev)
+        frames_row.addWidget(self.btn_invert)
         frames_row.addWidget(self.btn_import_png)
         frames_row.addWidget(self.btn_undo)
         frames_row.addWidget(self.btn_redo)
-        frames_row.addStretch(1)
+        frames_row.addWidget(self.sl_frame_nav, 1)
         frames_row.addWidget(self.lbl_counter)
 
         # Effect + speed for image animations
         img_opts = QHBoxLayout()
         img_v.addLayout(img_opts)
         lbl_effect_img = QLabel("✨")
-        lbl_effect_img.setStyleSheet("font-size:32px;")
+        self._register_font_scaled(lbl_effect_img, 26)
         img_opts.addWidget(lbl_effect_img)
         self.cb_effect_img = QComboBox()
         self.cb_effect_img.addItems(["NONE","SCROLL_UP","SCROLL_DOWN","SCROLL_LEFT","SCROLL_RIGHT","STACK","EXPAND","LASER"])
-        self.cb_effect_img.setStyleSheet("font-size:20px;")
+        self._register_font_scaled(self.cb_effect_img, 18, base_height=34)
         img_opts.addWidget(self.cb_effect_img)
         img_opts.addSpacing(12)
         lbl_speed_icon_img = QLabel("🏃")
-        lbl_speed_icon_img.setStyleSheet("font-size:32px;")
+        self._register_font_scaled(lbl_speed_icon_img, 26)
         img_opts.addWidget(lbl_speed_icon_img)
         self.sl_speed_img = QSlider(Qt.Horizontal)
         self.sl_speed_img.setRange(1, 3500)
@@ -484,6 +558,8 @@ class Main(QMainWindow):
         self.sl_speed_img.valueChanged.connect(lambda v: self._update_slider_display(self.sl_speed_img, self.lbl_speed_img, v))
         img_opts.addWidget(self.sl_speed_img, 1)
         img_opts.addWidget(self.lbl_speed_img)
+        self._register_font_scaled(self.lbl_speed_img, 18)
+        self._register_slider(self.sl_speed_img, base_height=28)
         self._update_slider_display(self.sl_speed_img, self.lbl_speed_img, self.sl_speed_img.value())
 
         # --- Tab: Text ---
@@ -493,31 +569,31 @@ class Main(QMainWindow):
 
         row1 = QHBoxLayout()
         lbl_text_icon = QLabel("💬")
-        lbl_text_icon.setStyleSheet("font-size:32px;")
+        self._register_font_scaled(lbl_text_icon, 26)
         row1.addWidget(lbl_text_icon)
         self.le_text = QLineEdit()
-        self.le_text.setStyleSheet("font-size:32px; color:#4eff00; background-color:#020302;")
+        self._register_font_scaled(self.le_text, 26, base_height=44, extra_style=" color:#4eff00; background-color:#020302;")
         row1.addWidget(self.le_text, 1)
         txt_v.addLayout(row1)
 
         row1b = QHBoxLayout()
         self.chk_two_lines = QCheckBox("〰️〰️")
-        self.chk_two_lines.setStyleSheet("font-size:32px;")
+        self._register_font_scaled(self.chk_two_lines, 24, base_height=32)
         row1b.addWidget(self.chk_two_lines)
         row1b.addStretch(1)
         txt_v.addLayout(row1b)
 
         row2 = QHBoxLayout()
         lbl_effect_txt = QLabel("✨")
-        lbl_effect_txt.setStyleSheet("font-size:32px;")
+        self._register_font_scaled(lbl_effect_txt, 26)
         row2.addWidget(lbl_effect_txt)
         self.cb_effect_txt = QComboBox()
         self.cb_effect_txt.addItems(["NONE","SCROLL_UP","SCROLL_DOWN","SCROLL_LEFT","SCROLL_RIGHT","STACK","EXPAND","LASER"])
-        self.cb_effect_txt.setStyleSheet("font-size:20px;")
+        self._register_font_scaled(self.cb_effect_txt, 18, base_height=34)
         row2.addWidget(self.cb_effect_txt)
         row2.addStretch(1)
         lbl_speed_icon_txt = QLabel("🏃")
-        lbl_speed_icon_txt.setStyleSheet("font-size:32px;")
+        self._register_font_scaled(lbl_speed_icon_txt, 26)
         row2.addWidget(lbl_speed_icon_txt)
         self.sl_speed_txt = QSlider(Qt.Horizontal)
         self.sl_speed_txt.setRange(1, 3500)
@@ -528,6 +604,8 @@ class Main(QMainWindow):
         self.sl_speed_txt.valueChanged.connect(lambda v: self._update_slider_display(self.sl_speed_txt, self.lbl_speed_txt, v))
         row2.addWidget(self.sl_speed_txt, 2)
         row2.addWidget(self.lbl_speed_txt)
+        self._register_font_scaled(self.lbl_speed_txt, 18)
+        self._register_slider(self.sl_speed_txt, base_height=28)
         txt_v.addLayout(row2)
         self._update_slider_display(self.sl_speed_txt, self.lbl_speed_txt, self.sl_speed_txt.value())
 
@@ -536,39 +614,52 @@ class Main(QMainWindow):
         self.tabs.addTab(t_info, "ℹ️")
         info_layout = QVBoxLayout(t_info)
         info_layout.addStretch(1)
-        lbl_info = QLabel("SpotLED GUI  (2025)\nby Adam Mateusz Brożyński\nbased on python-spotled \nby Izzie Walton")
+        lbl_info = QLabel("SpotLED GUI (2025)\nby Adam Mateusz Brozynski\nbased on python-spotled \nby Izzie Walton")
         lbl_info.setAlignment(Qt.AlignCenter)
-        lbl_info.setStyleSheet("font-size:20px; color:#4eff00;")
+        self._register_font_scaled(lbl_info, 18, extra_style=" color:#4eff00;")
         info_layout.addWidget(lbl_info)
         info_layout.addStretch(1)
 
         # --- Shared: MAC + Send ---
         row_mac = QHBoxLayout()
         mac_icon = QLabel("🖧")
-        mac_icon.setStyleSheet("font-size:32px;")
+        self._register_font_scaled(mac_icon, 26)
         row_mac.addWidget(mac_icon)
         self.cb_mac = QComboBox(); self.cb_mac.setEditable(True)
-        self.cb_mac.setStyleSheet("font-size:20px;")
+        self._register_font_scaled(self.cb_mac, 18, base_height=34)
         self.cb_mac.addItems(self.cfg.get("mac_history", []))
         if self.cfg.get("mac_history"):
             self.cb_mac.setCurrentText(self.cfg["mac_history"][0])
         row_mac.addWidget(self.cb_mac, 1)
         self.btn_load = QToolButton(); self.btn_load.setText("📂")
+        self._register_scalable_button(self.btn_load, font_size=32, base_size=(48, 40))
         self.btn_save = QToolButton(); self.btn_save.setText("💾")
-        for btn in (self.btn_load, self.btn_save):
-            btn.setFixedSize(64, 64)
-            btn.setStyleSheet("font-size:32px;")
+        self._register_scalable_button(self.btn_save, font_size=32, base_size=(48, 40))
         self.btn_load.clicked.connect(self._load_project)
         self.btn_save.clicked.connect(self._save_project)
         row_mac.addWidget(self.btn_load)
         row_mac.addWidget(self.btn_save)
         self.btn_send = QToolButton(); self.btn_send.setText("📤")
-        self.btn_send.setFixedSize(64, 64)
-        self.btn_send.setStyleSheet("font-size:32px;")
+        self._register_scalable_button(self.btn_send, font_size=32, base_size=(48, 40))
         self.btn_send.clicked.connect(self.send_current)
         row_mac.addWidget(self.btn_send)
         root.addLayout(row_mac)
 
+        self._tab_bar = self.tabs.tabBar()
+        self._playback_locked_widgets = [
+            self.grid,
+            self.btn_draw, self.btn_shift, self.btn_clear,
+            self.btn_prev, self.btn_next, self.btn_add, self.btn_remove, self.btn_copy_prev,
+            self.btn_invert, self.btn_import_png, self.btn_undo, self.btn_redo,
+            self.cb_effect_img, self.sl_speed_img,
+            self.le_text, self.chk_two_lines, self.cb_effect_txt, self.sl_speed_txt,
+            self.cb_mac, self.btn_load, self.btn_save, self.btn_send,
+            self.cb_ui_scale
+        ]
+        if hasattr(self, "sl_frame_nav"):
+            self._playback_locked_widgets.append(self.sl_frame_nav)
+
+        self._change_ui_scale_preset(self.cb_ui_scale.currentIndex())
         self._reset_history()
         self._refresh_counter()
 
@@ -620,6 +711,144 @@ class Main(QMainWindow):
         painter.end()
         return QIcon(pix)
 
+    def _build_invert_icon(self) -> QIcon:
+        size = 64
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = pix.rect().adjusted(6, 6, -6, -6)
+        painter.fillRect(rect.x(), rect.y(), rect.width() // 2, rect.height(), QColor("#0a0a0a"))
+        painter.fillRect(rect.x() + rect.width() // 2, rect.y(), rect.width() // 2, rect.height(), QColor("#4eff00"))
+        pen = QPen(QColor("#4eff00"))
+        pen.setWidth(4)
+        painter.setPen(pen)
+        painter.drawRect(rect)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor("#4eff00")))
+        painter.drawEllipse(rect.center(), 10, 10)
+        painter.setBrush(QBrush(QColor("#0a0a0a")))
+        painter.drawEllipse(rect.center().x() - 4, rect.center().y() - 4, 8, 8)
+        painter.end()
+        return QIcon(pix)
+
+    def _build_play_icon(self) -> QIcon:
+        size = 64
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        brush = QBrush(QColor("#4eff00"))
+        painter.setBrush(brush)
+        painter.setPen(Qt.NoPen)
+        margin = 16
+        points = [
+            QPointF(margin, margin),
+            QPointF(size - margin, size // 2),
+            QPointF(margin, size - margin)
+        ]
+        painter.drawPolygon(points)
+        painter.end()
+        return QIcon(pix)
+
+    def _build_stop_icon(self) -> QIcon:
+        size = 64
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QBrush(QColor("#4eff00")))
+        painter.setPen(Qt.NoPen)
+        margin = 16
+        painter.drawRoundedRect(margin, margin, size - 2*margin, size - 2*margin, 8, 8)
+        painter.end()
+        return QIcon(pix)
+
+    def _register_scalable_button(self, button: QToolButton, font_size: int = 24, icon_size: Optional[int] = None, base_size: Optional[Tuple[int, int]] = None):
+        self._scalable_buttons.append(button)
+        self._button_font_sizes[button] = font_size
+        if icon_size is not None:
+            self._button_icon_sizes[button] = icon_size
+        if base_size is None:
+            base_size = (self._base_button_size, self._base_button_size)
+        elif isinstance(base_size, int):
+            base_size = (base_size, base_size)
+        self._button_base_sizes[button] = base_size
+
+    def _register_font_scaled(self, widget, font_size: int, base_height: Optional[int] = None, extra_style: str = ""):
+        self._font_widgets[widget] = font_size
+        self._font_extra_styles[widget] = extra_style
+        if base_height is not None:
+            self._font_base_heights[widget] = base_height
+
+    def _register_slider(self, slider: QSlider, base_height: int = 28):
+        self._slider_base_heights[slider] = base_height
+
+    def _change_ui_scale_preset(self, index: int):
+        scale = self.cb_ui_scale.itemData(index, Qt.UserRole)
+        font_factor = self.cb_ui_scale.itemData(index, Qt.UserRole + 1)
+        slider_factor = self.cb_ui_scale.itemData(index, Qt.UserRole + 2)
+        if scale is None or font_factor is None or slider_factor is None:
+            return
+        self._current_scale_label = self.cb_ui_scale.itemText(index)
+        self._change_ui_scale(float(scale), float(font_factor), float(slider_factor))
+
+    def _change_ui_scale(self, scale: float, font_factor: Optional[float] = None, slider_factor: Optional[float] = None):
+        self.ui_scale = max(0.5, float(scale))
+        if font_factor is not None:
+            self._font_scale_factor = max(0.4, float(font_factor))
+        if slider_factor is not None:
+            self._slider_scale_factor = max(0.3, float(slider_factor))
+        self._apply_ui_scale()
+
+    def _apply_ui_scale(self):
+        font_scale = getattr(self, "_font_scale_factor", self.ui_scale)
+        slider_scale = getattr(self, "_slider_scale_factor", self.ui_scale)
+        for button in self._scalable_buttons:
+            base_w, base_h = self._button_base_sizes.get(button, (self._base_button_size, self._base_button_size))
+            width = max(20, int(base_w * self.ui_scale))
+            height = max(20, int(base_h * self.ui_scale))
+            button.setFixedSize(width, height)
+            base_font = self._button_font_sizes.get(button, 24)
+            button.setStyleSheet(f"font-size:{max(10, int(base_font * font_scale))}px;")
+            if button in self._button_icon_sizes:
+                icon_base = self._button_icon_sizes[button]
+                icon_val = max(12, int(icon_base * self.ui_scale))
+                button.setIconSize(QSize(icon_val, icon_val))
+        for widget, base_font in self._font_widgets.items():
+            font_val = max(8, int(base_font * font_scale))
+            extra = self._font_extra_styles.get(widget, "")
+            widget.setStyleSheet(f"font-size:{font_val}px;{extra}")
+            if widget in self._font_base_heights:
+                height = max(16, int(self._font_base_heights[widget] * font_scale))
+                widget.setFixedHeight(height)
+        handle_size = 10
+        for slider, base_height in self._slider_base_heights.items():
+            height = max(10, int(base_height * slider_scale))
+            groove = max(3, int(height * 0.25))
+            handle = handle_size
+            slider_height = max(height, handle)
+            slider.setFixedHeight(slider_height)
+            slider.setStyleSheet(
+                "QSlider::groove:horizontal {{ background:#033003; height:{}px; border-radius:{}px; }} "
+                "QSlider::handle:horizontal {{ background:#4eff00; width:{}px; height:{}px; margin:-{}px 0; border-radius:{}px; }}".format(
+                    groove, groove // 2, handle, handle, handle // 2, handle // 2
+                )
+            )
+        tab_font = max(10, int(24 * self.ui_scale))
+        tab_pad_v = max(4, int(10 * self.ui_scale))
+        tab_pad_h = max(6, int(14 * self.ui_scale))
+        self.tabs.setStyleSheet(f"QTabBar::tab {{ font-size:{tab_font}px; padding:{tab_pad_v}px {tab_pad_h}px; }}")
+
+    def _update_window_title(self):
+        title = "SpotLED GUI"
+        path = getattr(self, "_current_project_path", None)
+        if path:
+            name = os.path.basename(path)
+            if name:
+                title = f"{title} – {name}"
+        self.setWindowTitle(title)
+
     def showEvent(self, event):
         super().showEvent(event)
         if getattr(self, "_center_pending", False):
@@ -649,6 +878,14 @@ class Main(QMainWindow):
     def _refresh_counter(self):
         self.lbl_counter.setText(f"{self.cur+1}/{len(self.frames)}")
         self.btn_copy_prev.setEnabled(self.cur > 0)
+        if hasattr(self, "sl_frame_nav"):
+            self._frame_slider_sync = True
+            self.sl_frame_nav.setRange(1, max(1, len(self.frames)))
+            self.sl_frame_nav.setEnabled(len(self.frames) > 1)
+            self.sl_frame_nav.blockSignals(True)
+            self.sl_frame_nav.setValue(self.cur + 1)
+            self.sl_frame_nav.blockSignals(False)
+            self._frame_slider_sync = False
         self._update_history_buttons()
 
     def _grid_action_started(self):
@@ -659,6 +896,24 @@ class Main(QMainWindow):
 
     def _placement_confirmed(self):
         self._commit_imported_image()
+
+    def _frame_slider_changed(self, value: int):
+        if getattr(self, "_frame_slider_sync", False):
+            return
+        if not self._require_placement_confirmation():
+            self._frame_slider_sync = True
+            self.sl_frame_nav.blockSignals(True)
+            self.sl_frame_nav.setValue(self.cur + 1)
+            self.sl_frame_nav.blockSignals(False)
+            self._frame_slider_sync = False
+            return
+        value = max(1, min(len(self.frames), int(value)))
+        target = value - 1
+        if target == self.cur:
+            return
+        self.cur = target
+        self._load_current_into_grid()
+        self._refresh_counter()
 
     def _commit_imported_image(self) -> bool:
         result = self.grid.finalizePlacement()
@@ -733,6 +988,66 @@ class Main(QMainWindow):
         self._begin_action(self.cur)
         self.grid.clearAll()
         self._finish_action()
+
+    def _invert_current_grid(self):
+        if not self._require_placement_confirmation():
+            return
+        self._begin_action(self.cur)
+        self.grid.invertAll()
+        self._finish_action()
+
+    def _toggle_playback(self):
+        if self._is_playing:
+            self._stop_playback()
+        else:
+            self._start_playback()
+
+    def _start_playback(self):
+        if self._is_playing:
+            return
+        if not self._require_placement_confirmation():
+            return
+        self.frames[self.cur] = self.grid.getPixelsCopy()
+        self._is_playing = True
+        self._set_playback_locked(True)
+        self.play_timer.start(self._playback_interval_ms())
+
+    def _stop_playback(self):
+        if not self._is_playing:
+            return
+        self.play_timer.stop()
+        self._is_playing = False
+        self._set_playback_locked(False)
+
+    def _advance_playback(self):
+        if not self._is_playing:
+            return
+        if not self.frames:
+            return
+        self.cur = (self.cur + 1) % len(self.frames)
+        self._load_current_into_grid()
+        self._refresh_counter()
+
+    def _apply_playback_speed(self):
+        if not self._is_playing:
+            return
+        interval = self._playback_interval_ms()
+        self.play_timer.setInterval(interval)
+
+    def _playback_interval_ms(self) -> int:
+        return max(10, int(self.sl_speed_img.value()))
+
+    def _set_playback_locked(self, locked: bool):
+        for widget in self._playback_locked_widgets:
+            widget.setEnabled(not locked)
+        if self._tab_bar:
+            self._tab_bar.setEnabled(not locked)
+        if locked:
+            self.btn_play.setIcon(self._build_stop_icon())
+            self.btn_play.setToolTip("Stop")
+        else:
+            self.btn_play.setIcon(self._build_play_icon())
+            self.btn_play.setToolTip("Play")
 
     def _copy_from_previous_frame(self):
         if not self._require_placement_confirmation():
@@ -918,6 +1233,8 @@ class Main(QMainWindow):
             slider.blockSignals(False)
             value = snapped
         label.setText(str(value))
+        if getattr(self, "_is_playing", False) and slider is getattr(self, "sl_speed_img", None):
+            self._apply_playback_speed()
 
     def _serialize_frames(self) -> List[List[str]]:
         frames_data = []
@@ -982,6 +1299,8 @@ class Main(QMainWindow):
             return
 
         self._store_project_dir(os.path.dirname(path))
+        self._current_project_path = path
+        self._update_window_title()
 
     def _load_project(self):
         base_dir = self._project_dir()
@@ -1026,6 +1345,8 @@ class Main(QMainWindow):
             self._reset_history()
             self._load_current_into_grid()
             self._refresh_counter()
+            self._current_project_path = path
+            self._update_window_title()
         except Exception as e:
             QMessageBox.critical(self, "Data error", f"The file has an invalid structure:\n{e}")
             return
