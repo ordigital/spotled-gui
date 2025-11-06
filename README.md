@@ -2,7 +2,7 @@
 
 ![SpotLED GUI preview](spotled_gui.png)
 
-Desktop editor for SpotLED animations built with PySide6. The app lets you create and preview frame‑based LED animations before sending them to SpotLED hardware via BLE.
+Animation editor for Chinese SpotLED displays. The app lets you create and preview frame‑based LED animations before sending them to SpotLED hardware via BLE.
 
 ## Features
 - Pixel editor with drawing, erasing, clearing, and whole-frame shifting tools.
