@@ -521,7 +521,7 @@ class Main(QMainWindow):
         row2.addWidget(lbl_speed_icon_txt)
         self.sl_speed_txt = QSlider(Qt.Horizontal)
         self.sl_speed_txt.setRange(1, 3500)
-        self.sl_speed_txt.setSingleStep(50)
+        self.sl_speed_txt.setSingleStep(10)
         self.sl_speed_txt.setPageStep(100)
         self.sl_speed_txt.setValue(100)
         self.lbl_speed_txt = QLabel("100")
