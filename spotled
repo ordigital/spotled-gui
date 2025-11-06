@@ -1,0 +1,7 @@
+#!/bin/bash
+cd "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+echo "Activating venv…"
+source ./venv/bin/activate
+echo "Starting SpotLED GUI…"
+python3 ./spotled_gui.py
+

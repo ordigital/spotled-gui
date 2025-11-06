@@ -25,8 +25,7 @@ CFG_PATH = os.path.join(os.path.expanduser("~"), ".spotled_gui.json")
 @dataclass
 class Tool:
     DRAW = 1
-    ERASE = 2
-    SHIFT = 3
+    SHIFT = 2
 
 def load_cfg():
     if os.path.exists(CFG_PATH):
@@ -81,6 +80,7 @@ class PixelGrid(QWidget):
         self._placement_offset_start = (0, 0)
         self._placement_dragged = False
         self._placement_base: Optional[List[List[bool]]] = None
+        self._mouse_button = None
         self._update_cursor()
 
     def sizeHint(self) -> QSize:
@@ -119,20 +119,33 @@ class PixelGrid(QWidget):
     def getPixelsCopy(self) -> List[List[bool]]:
         return copy.deepcopy(self.px)
 
-    def _apply_at(self, x, y):
+    def _apply_at(self, x, y, value: bool):
         if self._placement_active:
             return
         if 0 <= x < GRID_W and 0 <= y < GRID_H:
-            val = (self.tool == Tool.DRAW)
-            if self.px[y][x] != val:
-                self.px[y][x] = val
+            if self.px[y][x] != value:
+                self.px[y][x] = value
                 self.update(QRect(x*CELL, y*CELL, CELL, CELL))
                 self.changed.emit()
 
     def mousePressEvent(self, e):
+        if e.button() == Qt.RightButton:
+            if self._placement_active:
+                return
+            self._mouse_down = True
+            self._mouse_button = Qt.RightButton
+            if not self._action_active:
+                self._action_active = True
+                self.action_started.emit()
+            x = int(e.position().x() // CELL)
+            y = int(e.position().y() // CELL)
+            self._apply_at(x, y, False)
+            return
+
         if e.button() == Qt.LeftButton:
             if self._placement_active:
                 self._mouse_down = True
+                self._mouse_button = Qt.LeftButton
                 cell_x = int(e.position().x() // CELL)
                 cell_y = int(e.position().y() // CELL)
                 self._placement_drag_start = (cell_x, cell_y)
@@ -140,6 +153,7 @@ class PixelGrid(QWidget):
                 self._placement_dragged = False
                 return
             self._mouse_down = True
+            self._mouse_button = Qt.LeftButton
             if not self._action_active:
                 self._action_active = True
                 self.action_started.emit()
@@ -150,7 +164,7 @@ class PixelGrid(QWidget):
                 self._shift_source = self.getPixelsCopy()
                 self._shift_last_delta = (0, 0)
             else:
-                self._apply_at(x, y)
+                self._apply_at(x, y, True)
 
     def mouseMoveEvent(self, e):
         if self._placement_active:
@@ -171,21 +185,33 @@ class PixelGrid(QWidget):
         if self._mouse_down:
             x = int(e.position().x() // CELL)
             y = int(e.position().y() // CELL)
-            if self.tool == Tool.SHIFT and self._shift_source is not None and self._shift_start_cell is not None:
+            if self._mouse_button == Qt.RightButton:
+                self._apply_at(x, y, False)
+            elif self.tool == Tool.SHIFT and self._shift_source is not None and self._shift_start_cell is not None:
                 dx = x - self._shift_start_cell[0]
                 dy = y - self._shift_start_cell[1]
                 self._apply_shift(dx, dy)
             else:
-                self._apply_at(x, y)
+                self._apply_at(x, y, True)
 
     def mouseReleaseEvent(self, e):
+        if e.button() == Qt.RightButton and self._mouse_button == Qt.RightButton:
+            self._mouse_down = False
+            self._mouse_button = None
+            if self._action_active:
+                self._action_active = False
+                self.action_finished.emit()
+            return
+
         if e.button() == Qt.LeftButton:
             if self._placement_active:
                 self._mouse_down = False
+                self._mouse_button = None
                 if not self._placement_dragged:
                     self.placement_confirmed.emit()
                 return
             self._mouse_down = False
+            self._mouse_button = None
             if self._action_active:
                 self._action_active = False
                 self.action_finished.emit()
@@ -377,20 +403,17 @@ class Main(QMainWindow):
         img_h.addLayout(tools_col)
 
         self.btn_draw = QToolButton(); self.btn_draw.setText("✏️")
-        self.btn_erase = QToolButton(); self.btn_erase.setText("🧽")
         self.btn_shift = QToolButton(); self.btn_shift.setIcon(self._build_shift_icon())
         self.btn_shift.setIconSize(QSize(40, 40))
         self.btn_shift.setToolTip("Przesuń wszystkie piksele")
         self.btn_clear = QToolButton(); self.btn_clear.setText("🧹")
-        for b in (self.btn_draw, self.btn_erase, self.btn_shift, self.btn_clear):
+        for b in (self.btn_draw, self.btn_shift, self.btn_clear):
             b.setFixedSize(64, 64)  # 2× larger
             b.setStyleSheet("font-size:24px;")
         self.btn_draw.clicked.connect(lambda: self._set_tool(Tool.DRAW))
-        self.btn_erase.clicked.connect(lambda: self._set_tool(Tool.ERASE))
         self.btn_shift.clicked.connect(lambda: self._set_tool(Tool.SHIFT))
         self.btn_clear.clicked.connect(self._clear_current_grid)
         tools_col.addWidget(self.btn_draw)
-        tools_col.addWidget(self.btn_erase)
         tools_col.addWidget(self.btn_shift)
         tools_col.addWidget(self.btn_clear)
         tools_col.addStretch(1)
@@ -621,7 +644,6 @@ class Main(QMainWindow):
 
     def _update_tool_buttons(self):
         self.btn_draw.setDown(self.grid.tool == Tool.DRAW)
-        self.btn_erase.setDown(self.grid.tool == Tool.ERASE)
         self.btn_shift.setDown(self.grid.tool == Tool.SHIFT)
 
     def _refresh_counter(self):
