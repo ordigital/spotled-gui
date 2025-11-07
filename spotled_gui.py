@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, os, sys, copy
+import copy
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QSize, QRect, Signal, QObject, QTimer, QPointF
-from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap, QImage
+from collections import OrderedDict
+
+from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, QObject, QTimer, QPointF
+from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap, QImage, QTextDocument, QPalette
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QTabWidget, QSlider, QLineEdit, QMessageBox, QToolButton,
-    QSizePolicy, QCheckBox, QFileDialog
+    QSizePolicy, QCheckBox, QFileDialog, QStyledItemDelegate, QStyle, QStyleOptionViewItem
 )
 
 # pip install python-spotled
@@ -21,6 +31,9 @@ except Exception:
 GRID_W, GRID_H = 48, 12
 CELL = 16
 CFG_PATH = os.path.join(os.path.expanduser("~"), ".spotled_gui.json")
+BLE_SCAN_TIMEOUT = 6
+SPOTLED_NAME_PREFIX = "SPOTLED_"
+BT_DEVICE_RE = re.compile(r"Device\s+([0-9A-Fa-f:]{17})\s+(.+)")
 
 @dataclass
 class Tool:
@@ -373,7 +386,62 @@ class PixelGrid(QWidget):
         for y in range(GRID_H+1):
             p.drawLine(0, y*CELL, GRID_W*CELL, y*CELL)
 
+
+class MacListDelegate(QStyledItemDelegate):
+    """Custom delegate that appends italicized device names next to MAC addresses."""
+
+    def paint(self, painter, option, index):
+        self.initStyleOption(option, index)
+        name = index.data(Qt.UserRole) or ""
+        if not name:
+            super().paint(painter, option, index)
+            return
+
+        mac = index.data(Qt.DisplayRole) or ""
+        opt = QStyleOptionViewItem(option)
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+
+        painter.save()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter)
+        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget)
+        painter.translate(text_rect.topLeft())
+
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(opt.font)
+        color_role = QPalette.HighlightedText if (opt.state & QStyle.State_Selected) else QPalette.Text
+        color = opt.palette.color(color_role)
+        safe_mac = html.escape(mac)
+        safe_name = html.escape(name)
+        doc.setHtml(
+            f"<span style='color:{color.name()};'>{safe_mac} "
+            f"<span style='font-style:italic;'>({safe_name})</span></span>"
+        )
+        doc.setTextWidth(text_rect.width())
+        doc.drawContents(painter, QRectF(0, 0, text_rect.width(), text_rect.height()))
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        self.initStyleOption(option, index)
+        name = index.data(Qt.UserRole) or ""
+        if not name:
+            return super().sizeHint(option, index)
+        mac = index.data(Qt.DisplayRole) or ""
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(option.font)
+        safe_mac = html.escape(mac)
+        safe_name = html.escape(name)
+        doc.setHtml(f"{safe_mac} <span style='font-style:italic;'>({safe_name})</span>")
+        doc_size = doc.size().toSize()
+        doc_size.setWidth(doc_size.width() + 8)
+        doc_size.setHeight(max(doc_size.height(), option.fontMetrics.height()) + 4)
+        return doc_size
+
+
 class Main(QMainWindow):
+    scanResultsReady = Signal(object, object, bool)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SpotLED GUI")
@@ -400,6 +468,11 @@ class Main(QMainWindow):
         self._slider_scale_factor = 1.0
         self._current_scale_label = ""
         self._current_project_path: Optional[str] = None
+        self._discovered_devices: OrderedDict[str, str] = OrderedDict()
+        self._scan_in_progress = False
+        self._bluetoothctl_path: Optional[str] = None
+        self._ble_scan_timeout = BLE_SCAN_TIMEOUT
+        self.scanResultsReady.connect(self._handle_scan_results)
         self._update_window_title()
 
         # --- frame model ---
@@ -651,11 +724,14 @@ class Main(QMainWindow):
         self._register_font_scaled(mac_icon, 26)
         row_mac.addWidget(mac_icon)
         self.cb_mac = QComboBox(); self.cb_mac.setEditable(True)
+        self._mac_delegate = MacListDelegate(self.cb_mac)
+        self.cb_mac.setItemDelegate(self._mac_delegate)
         self._register_font_scaled(self.cb_mac, 18, base_height=34)
-        self.cb_mac.addItems(self.cfg.get("mac_history", []))
-        if self.cfg.get("mac_history"):
-            self.cb_mac.setCurrentText(self.cfg["mac_history"][0])
         row_mac.addWidget(self.cb_mac, 1)
+        self.btn_scan = QToolButton(); self.btn_scan.setText("scan")
+        self._register_scalable_button(self.btn_scan, font_size=20, base_size=(74, 40))
+        self.btn_scan.clicked.connect(lambda: self._start_ble_scan(auto=False))
+        row_mac.addWidget(self.btn_scan)
         self.btn_load = QToolButton(); self.btn_load.setText("📂")
         self._register_scalable_button(self.btn_load, font_size=32, base_size=(48, 40))
         self.btn_save = QToolButton(); self.btn_save.setText("💾")
@@ -669,6 +745,7 @@ class Main(QMainWindow):
         self.btn_send.clicked.connect(self.send_current)
         row_mac.addWidget(self.btn_send)
         root.addLayout(row_mac)
+        self._rebuild_mac_combobox(self.cfg["mac_history"][0] if self.cfg.get("mac_history") else None)
 
         self._tab_bar = self.tabs.tabBar()
         self._playback_locked_widgets = [
@@ -679,7 +756,7 @@ class Main(QMainWindow):
             self.btn_import_png, self.btn_undo, self.btn_redo,
             self.cb_effect_img, self.sl_speed_img,
             self.le_text, self.chk_two_lines, self.cb_effect_txt, self.sl_speed_txt,
-            self.cb_mac, self.btn_load, self.btn_save, self.btn_send,
+            self.cb_mac, self.btn_scan, self.btn_load, self.btn_save, self.btn_send,
             self.cb_ui_scale
         ]
         if hasattr(self, "sl_frame_nav"):
@@ -688,6 +765,7 @@ class Main(QMainWindow):
         self._change_ui_scale_preset(self.cb_ui_scale.currentIndex())
         self._reset_history()
         self._refresh_counter()
+        QTimer.singleShot(800, lambda: self._start_ble_scan(auto=True))
 
     # --- model / UI sync ---
     def _build_app_icon(self) -> QIcon:
@@ -1285,9 +1363,128 @@ class Main(QMainWindow):
                 uniq.append(m)
         self.cfg["mac_history"] = uniq[:20]
         save_cfg(self.cfg)
+        self._rebuild_mac_combobox(mac)
+
+    def _ordered_mac_entries(self) -> List[str]:
+        seen = set()
+        ordered: List[str] = []
+        for mac in self._discovered_devices.keys():
+            norm = mac.strip().upper()
+            if norm and norm not in seen:
+                ordered.append(norm)
+                seen.add(norm)
+        for mac in self.cfg.get("mac_history", []):
+            norm = mac.strip().upper()
+            if norm and norm not in seen:
+                ordered.append(norm)
+                seen.add(norm)
+        return ordered
+
+    def _rebuild_mac_combobox(self, preferred: Optional[str] = None):
+        if not hasattr(self, "cb_mac"):
+            return
+        current_text = (preferred or self.cb_mac.currentText()).strip().upper()
+        entries = self._ordered_mac_entries()
+        self.cb_mac.blockSignals(True)
         self.cb_mac.clear()
-        self.cb_mac.addItems(self.cfg["mac_history"])
-        self.cb_mac.setCurrentText(mac)
+        for mac in entries:
+            self.cb_mac.addItem(mac)
+            name = self._discovered_devices.get(mac)
+            if name:
+                idx = self.cb_mac.count() - 1
+                self.cb_mac.setItemData(idx, name, Qt.UserRole)
+        self.cb_mac.blockSignals(False)
+        if current_text:
+            self.cb_mac.setCurrentText(current_text)
+        elif entries:
+            self.cb_mac.setCurrentIndex(0)
+        else:
+            self.cb_mac.setEditText("")
+
+    def _ensure_bluetoothctl_available(self, silent: bool) -> bool:
+        if self._bluetoothctl_path and os.path.exists(self._bluetoothctl_path):
+            return True
+        path = shutil.which("bluetoothctl")
+        if path:
+            self._bluetoothctl_path = path
+            return True
+        if not silent:
+            QMessageBox.warning(self, "Scan unavailable", "Polecenie 'bluetoothctl' nie jest dostępne.")
+        return False
+
+    def _start_ble_scan(self, auto: bool):
+        if self._scan_in_progress:
+            if not auto:
+                QMessageBox.information(self, "Scan", "Skanowanie już trwa.")
+            return
+        if not self._ensure_bluetoothctl_available(silent=auto):
+            return
+        self._scan_in_progress = True
+        if hasattr(self, "btn_scan"):
+            self.btn_scan.setEnabled(False)
+            self.btn_scan.setText("scan…")
+        worker = threading.Thread(target=self._run_ble_scan, args=(auto,), daemon=True)
+        worker.start()
+
+    def _run_ble_scan(self, auto: bool):
+        cmd_path = self._bluetoothctl_path or shutil.which("bluetoothctl") or "bluetoothctl"
+        cmd = [cmd_path, "--timeout", str(self._ble_scan_timeout), "scan", "on"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except Exception as e:
+            self.scanResultsReady.emit([], str(e), auto)
+            return
+        chunks = []
+        if proc.stdout:
+            chunks.append(proc.stdout)
+        if proc.stderr:
+            chunks.append(proc.stderr)
+        output = "\n".join(chunks)
+        found = OrderedDict()
+        for line in output.splitlines():
+            match = BT_DEVICE_RE.search(line)
+            if not match:
+                continue
+            mac = match.group(1).strip().upper()
+            name = match.group(2).strip()
+            if not name or not name.upper().startswith(SPOTLED_NAME_PREFIX):
+                continue
+            if mac not in found:
+                found[mac] = name
+        devices = list(found.items())
+        error_msg = None
+        if not devices and proc.returncode != 0:
+            combined = (proc.stderr or proc.stdout or "").strip()
+            if combined:
+                error_msg = combined
+            else:
+                error_msg = f"Skanowanie nie powiodło się (kod {proc.returncode})."
+        self.scanResultsReady.emit(devices, error_msg, auto)
+
+    def _handle_scan_results(self, devices, error, auto: bool):
+        self._scan_in_progress = False
+        if hasattr(self, "btn_scan"):
+            self.btn_scan.setEnabled(True)
+            self.btn_scan.setText("scan")
+        if error:
+            if not auto:
+                QMessageBox.warning(self, "Scan error", error)
+            return
+        if not devices:
+            if not auto:
+                QMessageBox.information(self, "Scan", "Nie znaleziono urządzeń SpotLED_.")
+            return
+
+        updated = False
+        for mac, name in devices:
+            mac = mac.strip().upper()
+            name = name.strip()
+            if mac not in self._discovered_devices or self._discovered_devices[mac] != name:
+                self._discovered_devices[mac] = name
+                updated = True
+        if updated or not self.cb_mac.count():
+            preferred = self.cb_mac.currentText().strip().upper() or devices[0][0]
+            self._rebuild_mac_combobox(preferred)
 
     def _store_project_dir(self, path: str):
         if not path:
