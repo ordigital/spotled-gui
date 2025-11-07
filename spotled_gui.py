@@ -19,7 +19,8 @@ from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QIcon, QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QTabWidget, QSlider, QLineEdit, QMessageBox, QToolButton,
-    QSizePolicy, QCheckBox, QFileDialog, QStyledItemDelegate, QStyle, QStyleOptionViewItem
+    QSizePolicy, QCheckBox, QFileDialog, QDialog, QDialogButtonBox,
+    QStyledItemDelegate, QStyle, QStyleOptionViewItem
 )
 
 # pip install python-spotled
@@ -579,7 +580,7 @@ class Main(QMainWindow):
         img_v.addLayout(frames_row)
 
         self.btn_play = QToolButton(); self.btn_play.setIcon(self._build_play_icon())
-        self.btn_play.setToolTip("Odtwarzaj klatki")
+        self.btn_play.setToolTip("Play frames")
         self._register_scalable_button(self.btn_play, font_size=24, icon_size=40)
         self.btn_prev = QToolButton(); self.btn_prev.setText("⬅️")
         self._register_scalable_button(self.btn_prev, font_size=24)
@@ -604,6 +605,9 @@ class Main(QMainWindow):
         self.btn_import_png = QToolButton(); self.btn_import_png.setText("🖼️")
         self.btn_import_png.setToolTip("Import frame from PNG")
         self._register_scalable_button(self.btn_import_png, font_size=24)
+        self.btn_insert_text = QToolButton(); self.btn_insert_text.setText("🔤")
+        self.btn_insert_text.setToolTip("Insert text (SLF fonts)")
+        self._register_scalable_button(self.btn_insert_text, font_size=24)
         self.btn_undo = QToolButton(); self.btn_undo.setText("↩️")
         self.btn_undo.setToolTip("Undo")
         self._register_scalable_button(self.btn_undo, font_size=24)
@@ -631,6 +635,7 @@ class Main(QMainWindow):
         self.btn_mirror_h.clicked.connect(self._mirror_current_grid_horizontal)
         self.btn_mirror_v.clicked.connect(self._mirror_current_grid_vertical)
         self.btn_import_png.clicked.connect(self._import_image_frame)
+        self.btn_insert_text.clicked.connect(self._start_text_placement)
         self.btn_undo.clicked.connect(self._undo)
         self.btn_redo.clicked.connect(self._redo)
         self.btn_play.clicked.connect(self._toggle_playback)
@@ -645,6 +650,7 @@ class Main(QMainWindow):
         frames_row.addWidget(self.btn_mirror_h)
         frames_row.addWidget(self.btn_mirror_v)
         frames_row.addWidget(self.btn_import_png)
+        frames_row.addWidget(self.btn_insert_text)
         frames_row.addWidget(self.btn_undo)
         frames_row.addWidget(self.btn_redo)
         frames_row.addWidget(self.sl_frame_nav, 1)
@@ -782,7 +788,7 @@ class Main(QMainWindow):
             self.btn_draw, self.btn_shift, self.btn_clear,
             self.btn_prev, self.btn_next, self.btn_add, self.btn_remove, self.btn_copy_prev,
             self.btn_invert, self.btn_mirror_h, self.btn_mirror_v,
-            self.btn_import_png, self.btn_undo, self.btn_redo,
+            self.btn_import_png, self.btn_insert_text, self.btn_undo, self.btn_redo,
             self.cb_effect_img, self.sl_speed_img,
             self.le_text, self.chk_two_lines, self.cb_font, self.cb_effect_txt, self.sl_speed_txt,
             self.cb_mac, self.btn_scan, self.btn_load, self.btn_save, self.btn_send,
@@ -1294,6 +1300,28 @@ class Main(QMainWindow):
         self._begin_action(self.cur)
         self.grid.startPlacement(pixels)
 
+    def _start_text_placement(self):
+        if not self._require_placement_confirmation():
+            return
+        fonts = self._available_slf_fonts()
+        if not fonts:
+            QMessageBox.critical(self, "Insert text", "No .slf fonts found inside the fonts/ directory.")
+            return
+        default_spec = self._amstrad_font_spec() or fonts[0]
+        prompt = self._prompt_text_with_font(fonts, default_spec)
+        if prompt is None:
+            return
+        text, spec = prompt
+        if not text:
+            QMessageBox.information(self, "Insert text", "Enter the text you want to place.")
+            return
+        pixels = self._build_pixels_from_font_text(text, spec)
+        if not pixels:
+            QMessageBox.critical(self, "Insert text", "Could not build glyphs from the selected font.")
+            return
+        self._begin_action(self.cur)
+        self.grid.startPlacement(pixels)
+
     def _apply_history_state(self, frame_idx: int, state: List[List[bool]]):
         if not 0 <= frame_idx < len(self.frames):
             return
@@ -1348,7 +1376,7 @@ class Main(QMainWindow):
             if not self._commit_imported_image():
                 return
         if len(self.frames) >= MAX_ANIMATION_FRAMES:
-            QMessageBox.critical(self, "Limit", f"Maksymalnie {MAX_ANIMATION_FRAMES} klatek.")
+            QMessageBox.critical(self, "Limit", f"Max. {MAX_ANIMATION_FRAMES} frames.")
             return
         self.frames.insert(self.cur+1, [[False]*GRID_W for _ in range(GRID_H)])
         self.cur += 1
@@ -1555,13 +1583,13 @@ class Main(QMainWindow):
             self._bluetoothctl_path = path
             return True
         if not silent:
-            QMessageBox.warning(self, "Scan unavailable", "Polecenie 'bluetoothctl' nie jest dostępne.")
+            QMessageBox.warning(self, "Scan unavailable", "Command 'bluetoothctl' is not available.")
         return False
 
     def _start_ble_scan(self, auto: bool):
         if self._scan_in_progress:
             if not auto:
-                QMessageBox.information(self, "Scan", "Skanowanie już trwa.")
+                QMessageBox.information(self, "Scan", "Scan is already running.")
             return
         if not self._ensure_bluetoothctl_available(silent=auto):
             return
@@ -1604,7 +1632,7 @@ class Main(QMainWindow):
             if combined:
                 error_msg = combined
             else:
-                error_msg = f"Skanowanie nie powiodło się (kod {proc.returncode})."
+                error_msg = f"Scan failed (exit code {proc.returncode})."
         self.scanResultsReady.emit(devices, error_msg, auto)
 
     def _handle_scan_results(self, devices, error, auto: bool):
@@ -1618,7 +1646,7 @@ class Main(QMainWindow):
             return
         if not devices:
             if not auto:
-                QMessageBox.information(self, "Scan", "Nie znaleziono urządzeń SpotLED_.")
+                QMessageBox.information(self, "Scan", "No SpotLED_ devices found.")
             return
 
         updated = False
@@ -1638,6 +1666,137 @@ class Main(QMainWindow):
             glyph = spec["chars"].get('?') or spec["chars"].get(' ') or next(iter(spec["chars"].values()))
         return glyph
 
+    def _available_slf_fonts(self) -> List[dict]:
+        fonts = list(self._font_specs.values())
+        fonts.sort(key=lambda spec: str(spec.get("name", "")).lower())
+        return fonts
+
+    def _prompt_text_with_font(self, fonts: List[dict], default_spec: Optional[dict]):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Insert text")
+        layout = QVBoxLayout(dialog)
+
+        lbl_text = QLabel("Text content:")
+        layout.addWidget(lbl_text)
+
+        edit = QLineEdit()
+        edit.setPlaceholderText("e.g. HELLO")
+        layout.addWidget(edit)
+
+        lbl_font = QLabel("Font (.slf):")
+        layout.addWidget(lbl_font)
+
+        combo = QComboBox()
+        for spec in fonts:
+            combo.addItem(spec.get("name", spec.get("id", "?")), spec.get("id"))
+        if default_spec:
+            idx = combo.findData(default_spec.get("id"))
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        layout.addWidget(combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        text = edit.text().replace("\n", " ").strip()
+        font_id = combo.currentData(Qt.UserRole)
+        selected = next((spec for spec in fonts if spec.get("id") == font_id), default_spec)
+        if text and selected is None:
+            selected = default_spec
+        return text, selected
+
+    def _amstrad_font_spec(self):
+        candidates = {
+            DEFAULT_FONT_ID,
+            os.path.normpath(DEFAULT_FONT_ID),
+            DEFAULT_FONT_ID.replace("/", os.sep),
+            DEFAULT_FONT_ID.replace("\\", os.sep),
+        }
+        for font_id in candidates:
+            spec = self._font_specs.get(font_id)
+            if spec:
+                return spec
+        for spec in self._font_specs.values():
+            if str(spec.get("name", "")).lower().startswith("amstrad cpc"):
+                return spec
+        font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_FONT_ID)
+        if os.path.exists(font_path):
+            try:
+                spec = self._parse_slf_font(font_path)
+                if spec:
+                    self._font_specs[spec["id"]] = spec
+                    return spec
+            except Exception as exc:
+                print(f"[Font] Could not load {font_path}: {exc}")
+        return None
+
+    def _build_pixels_from_font_text(self, text: str, spec) -> Optional[List[List[bool]]]:
+        height = spec["height"]
+        spacing_cols = 1
+        glyphs: List[List[List[bool]]] = []
+        total_width = 0
+        for idx, ch in enumerate(text):
+            glyph_rows = self._custom_font_char(spec, ch)
+            glyph_bool = [[c == '1' for c in row] for row in glyph_rows]
+            min_width = 2 if ch.isspace() else 1
+            trimmed = self._trim_glyph_columns(glyph_bool, min_width=min_width)
+            if not trimmed or not trimmed[0]:
+                continue
+            glyph_width = len(trimmed[0])
+            glyphs.append(trimmed)
+            total_width += glyph_width
+            if idx < len(text) - 1:
+                total_width += spacing_cols
+        if not glyphs or total_width <= 0:
+            return None
+        pixels = [[False for _ in range(total_width)] for _ in range(height)]
+        x_offset = 0
+        for idx, glyph in enumerate(glyphs):
+            glyph_width = len(glyph[0])
+            for y in range(height):
+                row = glyph[y]
+                for gx in range(glyph_width):
+                    if row[gx]:
+                        pixels[y][x_offset + gx] = True
+            x_offset += glyph_width
+            if idx < len(glyphs) - 1:
+                x_offset += spacing_cols
+        return pixels
+
+    def _trim_glyph_columns(self, glyph_rows: List[List[bool]], min_width: int = 1) -> List[List[bool]]:
+        if not glyph_rows:
+            return []
+        width = len(glyph_rows[0]) if glyph_rows[0] else 0
+        height = len(glyph_rows)
+        if width == 0:
+            blank_width = max(1, min_width)
+            return [[False for _ in range(blank_width)] for _ in range(height)]
+
+        def column_empty(idx: int) -> bool:
+            return all(idx < len(row) and not row[idx] for row in glyph_rows)
+
+        left = 0
+        right = width - 1
+        while left < width and column_empty(left):
+            left += 1
+        while right >= left and column_empty(right):
+            right -= 1
+
+        if left > right:
+            blank_width = max(1, min_width)
+            return [[False for _ in range(blank_width)] for _ in range(height)]
+
+        trimmed = [row[left:right+1] for row in glyph_rows]
+        trimmed_width = len(trimmed[0]) if trimmed and trimmed[0] else 0
+        if trimmed_width < min_width:
+            pad = min_width - trimmed_width
+            trimmed = [row + [False] * pad for row in trimmed]
+        return trimmed
+
     def _custom_font_speed_byte(self, slider_value: int) -> int:
         slider_min = getattr(self.sl_speed_txt, "minimum", lambda: 0)()
         slider_max = getattr(self.sl_speed_txt, "maximum", lambda: 255)()
@@ -1650,11 +1809,11 @@ class Main(QMainWindow):
     def _send_custom_font_text(self, sender, text: str, effect, speed_slider_value: int):
         spec = self._current_font_spec()
         if spec is None:
-            raise ValueError("Brak danych czcionki.")
+            raise ValueError("Font data is unavailable.")
         if not text:
-            raise ValueError("Wpisz tekst.")
+            raise ValueError("Enter the text.")
         if spotled is None:
-            raise RuntimeError("Brak biblioteki spotled.")
+            raise RuntimeError("spotled library is missing.")
         width = spec["width"]
         height = spec["height"]
         font_chars = []
@@ -1668,7 +1827,7 @@ class Main(QMainWindow):
             cache[ch] = glyph_data
             font_chars.append(glyph_data)
         if not font_chars:
-            raise ValueError("Brak znaków do wysłania.")
+            raise ValueError("No characters to send.")
         sender.send_data(spotled.SendDataCommand(spotled.FontData(font_chars).serialize()))
         speed_byte = self._custom_font_speed_byte(speed_slider_value)
         sender.send_data(spotled.SendDataCommand(spotled.TextData(text, speed_byte, effect).serialize()))
@@ -1850,7 +2009,7 @@ class Main(QMainWindow):
                 self.frames[self.cur] = self.grid.getPixelsCopy()
 
                 if len(self.frames) > MAX_ANIMATION_FRAMES:
-                    QMessageBox.critical(self, "Limit", f"Animacja może zawierać maksymalnie {MAX_ANIMATION_FRAMES} klatek.")
+                    QMessageBox.critical(self, "Limit", f"Animation can contain at most {MAX_ANIMATION_FRAMES} frames.")
                     return
                 frames_data = []
                 for fpx in self.frames:
@@ -1895,7 +2054,7 @@ class Main(QMainWindow):
                     QMessageBox.information(self, "OK", "Text sent.")
                 else:
                     if use_lines:
-                        QMessageBox.warning(self, "Font", "Niestandardowe czcionki obsługują tylko pojedynczą linię tekstu.")
+                        QMessageBox.warning(self, "Font", "Custom fonts support only a single text line.")
                         return
                     try:
                         self._send_custom_font_text(sender, text, eff, speed)

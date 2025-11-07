@@ -42,7 +42,7 @@ python -m venv venv
 source venv/bin/activate 
 pip install PySide6 spotled
 
-# or use script:
+# or use script for Ubuntu 24.04:
 chmod +x ./install.sh
 sudo ./install.sh
 ```
