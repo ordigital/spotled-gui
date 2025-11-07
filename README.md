@@ -24,13 +24,23 @@ Animation editor for Chinese SpotLED displays. The app lets you create and previ
 git clone https://github.com/ordigital/spotled-gui.git
 cd spotled-gui
 
+# install deps
+sudo apt install pkg-config libglib2.0-dev \
+    libboost-python-dev python3-gattlib libbluetooth-dev \
+    bluez build-essential python3.12-dev \
+    libboost-thread-dev libboost-python-dev \
+    libglib2.0-dev libbluetooth-dev pkg-config \
+    libxcb-cursor0
+
+
 # create and activate a virtual environment:
-python -m venv .venv
-source .venv/bin/activate 
-pip install PySide6 python-spotled
+python -m venv venv
+source venv/bin/activate 
+pip install PySide6 spotled
 
 # or use script:
-install.sh
+chmod +x ./install.sh
+sudo ./install.sh
 ```
 
 ## Running
@@ -39,7 +49,8 @@ install.sh
 python spotled_gui.py
 
 # or just:
-spotled
+chmod +x ./spotled
+./spotled
 ```
 
 The GUI opens immediately. Make sure your SpotLED device is powered on and reachable over BLE before using the send functionality.
