@@ -34,6 +34,7 @@ CFG_PATH = os.path.join(os.path.expanduser("~"), ".spotled_gui.json")
 FONT_ID_BUILTIN = "__builtin__"
 DEFAULT_FONT_ID = "fonts/amstrad_cpc.slf"
 DEFAULT_UI_SCALE_IDX = 2
+MAX_ANIMATION_FRAMES = 20
 BLE_SCAN_TIMEOUT = 6
 SPOTLED_NAME_PREFIX = "SPOTLED_"
 BT_DEVICE_RE = re.compile(r"Device\s+([0-9A-Fa-f:]{17})\s+(.+)")
@@ -1346,6 +1347,9 @@ class Main(QMainWindow):
         if self.grid.isPlacementActive():
             if not self._commit_imported_image():
                 return
+        if len(self.frames) >= MAX_ANIMATION_FRAMES:
+            QMessageBox.critical(self, "Limit", f"Maksymalnie {MAX_ANIMATION_FRAMES} klatek.")
+            return
         self.frames.insert(self.cur+1, [[False]*GRID_W for _ in range(GRID_H)])
         self.cur += 1
         self._load_current_into_grid()
@@ -1845,6 +1849,9 @@ class Main(QMainWindow):
                 # ensure the current buffer is persisted in the model
                 self.frames[self.cur] = self.grid.getPixelsCopy()
 
+                if len(self.frames) > MAX_ANIMATION_FRAMES:
+                    QMessageBox.critical(self, "Limit", f"Animacja może zawierać maksymalnie {MAX_ANIMATION_FRAMES} klatek.")
+                    return
                 frames_data = []
                 for fpx in self.frames:
                     bmp = bitmap_string_from_pixels(fpx)
