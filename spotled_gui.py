@@ -110,6 +110,21 @@ class PixelGrid(QWidget):
         self.update()
         self.changed.emit()
 
+    def mirrorHorizontal(self):
+        if self._placement_active:
+            return
+        for y in range(GRID_H):
+            self.px[y] = list(reversed(self.px[y]))
+        self.update()
+        self.changed.emit()
+
+    def mirrorVertical(self):
+        if self._placement_active:
+            return
+        self.px = list(reversed(self.px))
+        self.update()
+        self.changed.emit()
+
     def setPixels(self, pxs: List[List[bool]]):
         # deep copy so editing does not mutate the source list
         if self._placement_active:
@@ -490,6 +505,12 @@ class Main(QMainWindow):
         self.btn_invert = QToolButton(); self.btn_invert.setIcon(self._build_invert_icon())
         self.btn_invert.setToolTip("Invert pixels")
         self._register_scalable_button(self.btn_invert, font_size=24, icon_size=40)
+        self.btn_mirror_h = QToolButton(); self.btn_mirror_h.setIcon(self._build_mirror_horizontal_icon())
+        self.btn_mirror_h.setToolTip("Mirror horizontally")
+        self._register_scalable_button(self.btn_mirror_h, font_size=24, icon_size=40)
+        self.btn_mirror_v = QToolButton(); self.btn_mirror_v.setIcon(self._build_mirror_vertical_icon())
+        self.btn_mirror_v.setToolTip("Mirror vertically")
+        self._register_scalable_button(self.btn_mirror_v, font_size=24, icon_size=40)
         self.btn_import_png = QToolButton(); self.btn_import_png.setText("🖼️")
         self.btn_import_png.setToolTip("Import frame from PNG")
         self._register_scalable_button(self.btn_import_png, font_size=24)
@@ -517,6 +538,8 @@ class Main(QMainWindow):
         self.btn_remove.clicked.connect(self._remove_current_frame)
         self.btn_copy_prev.clicked.connect(self._copy_from_previous_frame)
         self.btn_invert.clicked.connect(self._invert_current_grid)
+        self.btn_mirror_h.clicked.connect(self._mirror_current_grid_horizontal)
+        self.btn_mirror_v.clicked.connect(self._mirror_current_grid_vertical)
         self.btn_import_png.clicked.connect(self._import_image_frame)
         self.btn_undo.clicked.connect(self._undo)
         self.btn_redo.clicked.connect(self._redo)
@@ -529,6 +552,8 @@ class Main(QMainWindow):
         frames_row.addWidget(self.btn_remove)
         frames_row.addWidget(self.btn_copy_prev)
         frames_row.addWidget(self.btn_invert)
+        frames_row.addWidget(self.btn_mirror_h)
+        frames_row.addWidget(self.btn_mirror_v)
         frames_row.addWidget(self.btn_import_png)
         frames_row.addWidget(self.btn_undo)
         frames_row.addWidget(self.btn_redo)
@@ -650,7 +675,8 @@ class Main(QMainWindow):
             self.grid,
             self.btn_draw, self.btn_shift, self.btn_clear,
             self.btn_prev, self.btn_next, self.btn_add, self.btn_remove, self.btn_copy_prev,
-            self.btn_invert, self.btn_import_png, self.btn_undo, self.btn_redo,
+            self.btn_invert, self.btn_mirror_h, self.btn_mirror_v,
+            self.btn_import_png, self.btn_undo, self.btn_redo,
             self.cb_effect_img, self.sl_speed_img,
             self.le_text, self.chk_two_lines, self.cb_effect_txt, self.sl_speed_txt,
             self.cb_mac, self.btn_load, self.btn_save, self.btn_send,
@@ -729,6 +755,52 @@ class Main(QMainWindow):
         painter.drawEllipse(rect.center(), 10, 10)
         painter.setBrush(QBrush(QColor("#0a0a0a")))
         painter.drawEllipse(rect.center().x() - 4, rect.center().y() - 4, 8, 8)
+        painter.end()
+        return QIcon(pix)
+
+    def _build_mirror_horizontal_icon(self) -> QIcon:
+        size = 64
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#4eff00"))
+        pen.setWidth(6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        center = size // 2
+        margin = 10
+        painter.drawLine(center, margin, center, size - margin)
+        painter.drawLine(margin, center, size - margin, center)
+        arrow = 12
+        painter.drawLine(margin, center, margin + arrow, center - arrow // 2)
+        painter.drawLine(margin, center, margin + arrow, center + arrow // 2)
+        painter.drawLine(size - margin, center, size - margin - arrow, center - arrow // 2)
+        painter.drawLine(size - margin, center, size - margin - arrow, center + arrow // 2)
+        painter.end()
+        return QIcon(pix)
+
+    def _build_mirror_vertical_icon(self) -> QIcon:
+        size = 64
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#4eff00"))
+        pen.setWidth(6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        center = size // 2
+        margin = 10
+        painter.drawLine(margin, center, size - margin, center)
+        painter.drawLine(center, margin, center, size - margin)
+        arrow = 12
+        painter.drawLine(center, margin, center - arrow // 2, margin + arrow)
+        painter.drawLine(center, margin, center + arrow // 2, margin + arrow)
+        painter.drawLine(center, size - margin, center - arrow // 2, size - margin - arrow)
+        painter.drawLine(center, size - margin, center + arrow // 2, size - margin - arrow)
         painter.end()
         return QIcon(pix)
 
@@ -994,6 +1066,20 @@ class Main(QMainWindow):
             return
         self._begin_action(self.cur)
         self.grid.invertAll()
+        self._finish_action()
+
+    def _mirror_current_grid_horizontal(self):
+        if not self._require_placement_confirmation():
+            return
+        self._begin_action(self.cur)
+        self.grid.mirrorHorizontal()
+        self._finish_action()
+
+    def _mirror_current_grid_vertical(self):
+        if not self._require_placement_confirmation():
+            return
+        self._begin_action(self.cur)
+        self.grid.mirrorVertical()
         self._finish_action()
 
     def _toggle_playback(self):

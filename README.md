@@ -32,7 +32,6 @@ sudo apt install pkg-config libglib2.0-dev \
     libglib2.0-dev libbluetooth-dev pkg-config \
     libxcb-cursor0
 
-
 # create and activate a virtual environment:
 python -m venv venv
 source venv/bin/activate 
