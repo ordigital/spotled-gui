@@ -2,7 +2,7 @@
 
 ![SpotLED GUI preview](spotled_gui.png)
 
-Animation editor for Chinese SpotLED displays. The app lets you create and preview frame‑based LED animations before sending them to SpotLED hardware via BLE. I have 
+Animation editor for Chinese SpotLED displays. The app lets you create and preview frame‑based LED animations before sending them to SpotLED hardware via BLE.
 
 ## Disclaimer
 Notice! This library is not affilated with the creator of this product.
