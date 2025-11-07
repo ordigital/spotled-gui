@@ -23,7 +23,11 @@ Notice! This library is not affilated with the creator of this product.
 - [PySide6](https://doc.qt.io/qtforpython/) for the Qt-based GUI
 - [python-spotled](https://github.com/iwalton3/python-spotled) for communicating with SpotLED hardware
 
-## Installation
+## Quick start
+
+Get the release package https://github.com/ordigital/spotled-gui/releases/download/v1.0/SpotLED-1.0-x86_64_AppImage.zip and run `SpotLED-GUI-x86_64.AppImage`
+
+## Installation (from source tree)
 
 ```bash
 git clone https://github.com/ordigital/spotled-gui.git
