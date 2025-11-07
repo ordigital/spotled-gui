@@ -31,6 +31,7 @@ except Exception:
 GRID_W, GRID_H = 48, 12
 CELL = 16
 CFG_PATH = os.path.join(os.path.expanduser("~"), ".spotled_gui.json")
+FONT_ID_BUILTIN = "__builtin__"
 BLE_SCAN_TIMEOUT = 6
 SPOTLED_NAME_PREFIX = "SPOTLED_"
 BT_DEVICE_RE = re.compile(r"Device\s+([0-9A-Fa-f:]{17})\s+(.+)")
@@ -49,10 +50,12 @@ def load_cfg():
                     data["mac_history"] = []
                 if "project_dir" not in data:
                     data["project_dir"] = ""
+                if "selected_font" not in data:
+                    data["selected_font"] = FONT_ID_BUILTIN
                 return data
         except Exception:
             pass
-    return {"mac_history": [], "project_dir": ""}
+    return {"mac_history": [], "project_dir": "", "selected_font": FONT_ID_BUILTIN}
 
 def save_cfg(cfg):
     try:
@@ -446,6 +449,8 @@ class Main(QMainWindow):
         super().__init__()
         self.setWindowTitle("SpotLED GUI")
         self.cfg = load_cfg()
+        self._font_specs = {}
+        self._load_custom_fonts()
         self.setWindowIcon(self._build_app_icon())
         self.setFixedSize(self.sizeHint())
         self.setWindowFlag(Qt.MSWindowsFixedSizeDialogHint, True)
@@ -681,6 +686,17 @@ class Main(QMainWindow):
         row1b.addStretch(1)
         txt_v.addLayout(row1b)
 
+        row_font = QHBoxLayout()
+        lbl_font = QLabel("Font")
+        self._register_font_scaled(lbl_font, 18)
+        row_font.addWidget(lbl_font)
+        self.cb_font = QComboBox()
+        self._register_font_scaled(self.cb_font, 18, base_height=34)
+        self.cb_font.currentIndexChanged.connect(self._font_choice_changed)
+        row_font.addWidget(self.cb_font, 1)
+        txt_v.addLayout(row_font)
+        self._populate_font_combo()
+
         row2 = QHBoxLayout()
         lbl_effect_txt = QLabel("✨")
         self._register_font_scaled(lbl_effect_txt, 26)
@@ -694,11 +710,11 @@ class Main(QMainWindow):
         self._register_font_scaled(lbl_speed_icon_txt, 26)
         row2.addWidget(lbl_speed_icon_txt)
         self.sl_speed_txt = QSlider(Qt.Horizontal)
-        self.sl_speed_txt.setRange(1, 3500)
+        self.sl_speed_txt.setRange(0, 3500)
         self.sl_speed_txt.setSingleStep(10)
         self.sl_speed_txt.setPageStep(100)
-        self.sl_speed_txt.setValue(100)
-        self.lbl_speed_txt = QLabel("100")
+        self.sl_speed_txt.setValue(0)
+        self.lbl_speed_txt = QLabel("0")
         self.sl_speed_txt.valueChanged.connect(lambda v: self._update_slider_display(self.sl_speed_txt, self.lbl_speed_txt, v))
         row2.addWidget(self.sl_speed_txt, 2)
         row2.addWidget(self.lbl_speed_txt)
@@ -755,7 +771,7 @@ class Main(QMainWindow):
             self.btn_invert, self.btn_mirror_h, self.btn_mirror_v,
             self.btn_import_png, self.btn_undo, self.btn_redo,
             self.cb_effect_img, self.sl_speed_img,
-            self.le_text, self.chk_two_lines, self.cb_effect_txt, self.sl_speed_txt,
+            self.le_text, self.chk_two_lines, self.cb_font, self.cb_effect_txt, self.sl_speed_txt,
             self.cb_mac, self.btn_scan, self.btn_load, self.btn_save, self.btn_send,
             self.cb_ui_scale
         ]
@@ -1401,6 +1417,112 @@ class Main(QMainWindow):
         else:
             self.cb_mac.setEditText("")
 
+    # --- Font helpers ---
+    def _fonts_dir(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
+    def _load_custom_fonts(self):
+        self._font_specs = {}
+        fonts_dir = self._fonts_dir()
+        if not os.path.isdir(fonts_dir):
+            return
+        for entry in sorted(os.listdir(fonts_dir)):
+            if not entry.lower().endswith(".slf"):
+                continue
+            path = os.path.join(fonts_dir, entry)
+            try:
+                spec = self._parse_slf_font(path)
+                if spec:
+                    self._font_specs[spec["id"]] = spec
+            except Exception as exc:
+                print(f"[Font] Could not load {path}: {exc}")
+
+    def _parse_slf_font(self, path: str):
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        name = str(raw.get("name") or os.path.splitext(os.path.basename(path))[0]).strip() or os.path.splitext(os.path.basename(path))[0]
+        width = int(raw.get("width") or 0)
+        height = int(raw.get("height") or 0)
+        if width <= 0 or height <= 0:
+            raise ValueError("Font width/height must be positive.")
+        chars_raw = raw.get("chars")
+        if not isinstance(chars_raw, dict) or not chars_raw:
+            raise ValueError("Font file is missing glyph data.")
+        normalized = {}
+        blank_line = "." * width
+        for key, rows in chars_raw.items():
+            if not key:
+                continue
+            char = key[0]
+            if not isinstance(rows, list):
+                continue
+            glyph_rows = []
+            for idx in range(height):
+                if idx < len(rows):
+                    row = rows[idx]
+                    if not isinstance(row, str):
+                        row = ""
+                else:
+                    row = ""
+                cleaned = row.replace("#", "1").replace(" ", ".")
+                if len(cleaned) < width:
+                    cleaned = cleaned + "." * (width - len(cleaned))
+                elif len(cleaned) > width:
+                    cleaned = cleaned[:width]
+                glyph_rows.append(cleaned)
+            if not glyph_rows:
+                glyph_rows = [blank_line for _ in range(height)]
+            normalized[char] = tuple(glyph_rows)
+        if " " not in normalized:
+            normalized[" "] = tuple(blank_line for _ in range(height))
+        font_id = os.path.relpath(path, start=os.path.dirname(os.path.abspath(__file__)))
+        return {
+            "id": font_id,
+            "name": name,
+            "width": width,
+            "height": height,
+            "chars": normalized
+        }
+
+    def _populate_font_combo(self):
+        if not hasattr(self, "cb_font"):
+            return
+        current_choice = self.cfg.get("selected_font", FONT_ID_BUILTIN)
+        self.cb_font.blockSignals(True)
+        self.cb_font.clear()
+        self.cb_font.addItem("built-in", FONT_ID_BUILTIN)
+        for font_id in sorted(self._font_specs.keys()):
+            spec = self._font_specs[font_id]
+            self.cb_font.addItem(spec["name"], font_id)
+        self.cb_font.blockSignals(False)
+        idx = self.cb_font.findData(current_choice)
+        if idx < 0:
+            idx = 0
+        self.cb_font.setCurrentIndex(idx)
+        self._font_choice_changed(idx)
+
+    def _font_choice_changed(self, idx: int):
+        if not hasattr(self, "cb_font"):
+            return
+        font_id = self.cb_font.itemData(idx, Qt.UserRole) or FONT_ID_BUILTIN
+        self.cfg["selected_font"] = font_id
+        save_cfg(self.cfg)
+        if hasattr(self, "chk_two_lines"):
+            allow_two_lines = font_id == FONT_ID_BUILTIN
+            self.chk_two_lines.setEnabled(allow_two_lines)
+            if not allow_two_lines and self.chk_two_lines.isChecked():
+                self.chk_two_lines.setChecked(False)
+
+    def _current_font_choice(self) -> str:
+        if not hasattr(self, "cb_font"):
+            return FONT_ID_BUILTIN
+        data = self.cb_font.currentData(Qt.UserRole)
+        return data if data else FONT_ID_BUILTIN
+
+    def _current_font_spec(self):
+        font_id = self._current_font_choice()
+        return self._font_specs.get(font_id)
+
     def _ensure_bluetoothctl_available(self, silent: bool) -> bool:
         if self._bluetoothctl_path and os.path.exists(self._bluetoothctl_path):
             return True
@@ -1485,6 +1607,47 @@ class Main(QMainWindow):
         if updated or not self.cb_mac.count():
             preferred = self.cb_mac.currentText().strip().upper() or devices[0][0]
             self._rebuild_mac_combobox(preferred)
+
+    def _custom_font_char(self, spec, ch: str):
+        glyph = spec["chars"].get(ch)
+        if glyph is None:
+            glyph = spec["chars"].get('?') or spec["chars"].get(' ') or next(iter(spec["chars"].values()))
+        return glyph
+
+    def _custom_font_speed_byte(self, slider_value: int) -> int:
+        slider_min = getattr(self.sl_speed_txt, "minimum", lambda: 0)()
+        slider_max = getattr(self.sl_speed_txt, "maximum", lambda: 255)()
+        span = max(1, slider_max - slider_min)
+        clamped = max(slider_min, min(slider_max, int(slider_value)))
+        ratio = (clamped - slider_min) / span
+        speed = int(round(ratio * 255))
+        return max(0, min(255, speed))
+
+    def _send_custom_font_text(self, sender, text: str, effect, speed_slider_value: int):
+        spec = self._current_font_spec()
+        if spec is None:
+            raise ValueError("Brak danych czcionki.")
+        if not text:
+            raise ValueError("Wpisz tekst.")
+        if spotled is None:
+            raise RuntimeError("Brak biblioteki spotled.")
+        width = spec["width"]
+        height = spec["height"]
+        font_chars = []
+        cache = {}
+        for ch in text:
+            if ch in cache:
+                continue
+            glyph = self._custom_font_char(spec, ch)
+            bitmap = spotled.gen_bitmap(*glyph, min_len=width)
+            glyph_data = spotled.FontCharacterData(width, height, ch, bitmap)
+            cache[ch] = glyph_data
+            font_chars.append(glyph_data)
+        if not font_chars:
+            raise ValueError("Brak znaków do wysłania.")
+        sender.send_data(spotled.SendDataCommand(spotled.FontData(font_chars).serialize()))
+        speed_byte = self._custom_font_speed_byte(speed_slider_value)
+        sender.send_data(spotled.SendDataCommand(spotled.TextData(text, speed_byte, effect).serialize()))
 
     def _store_project_dir(self, path: str):
         if not path:
@@ -1691,17 +1854,28 @@ class Main(QMainWindow):
                 eff = getattr(spotled.Effect, eff_name, spotled.Effect.NONE)
                 speed = int(self.sl_speed_txt.value())
                 use_lines = self.chk_two_lines.isChecked()
-                try:
+                if self._current_font_choice() == FONT_ID_BUILTIN:
+                    try:
+                        if use_lines:
+                            sender.set_text_lines(text, effect=eff, speed=speed)
+                        else:
+                            sender.set_text(text, effect=eff, speed=speed)
+                    except TypeError:
+                        if use_lines:
+                            sender.set_text_lines(text, effect=eff)
+                        else:
+                            sender.set_text(text, effect=eff)
+                    QMessageBox.information(self, "OK", "Text sent.")
+                else:
                     if use_lines:
-                        sender.set_text_lines(text, effect=eff, speed=speed)
-                    else:
-                        sender.set_text(text, effect=eff, speed=speed)
-                except TypeError:
-                    if use_lines:
-                        sender.set_text_lines(text, effect=eff)
-                    else:
-                        sender.set_text(text, effect=eff)
-                QMessageBox.information(self, "OK", "Text sent.")
+                        QMessageBox.warning(self, "Font", "Niestandardowe czcionki obsługują tylko pojedynczą linię tekstu.")
+                        return
+                    try:
+                        self._send_custom_font_text(sender, text, eff, speed)
+                    except Exception as font_err:
+                        QMessageBox.critical(self, "Font error", str(font_err))
+                        return
+                    QMessageBox.information(self, "OK", "Text sent.")
         except Exception as e:
             QMessageBox.critical(self, "Send error", str(e))
         finally:
