@@ -2,7 +2,10 @@
 
 ![SpotLED GUI preview](spotled_gui.png)
 
-Animation editor for Chinese SpotLED displays. The app lets you create and preview frame‑based LED animations before sending them to SpotLED hardware via BLE.
+Animation editor for Chinese SpotLED displays. The app lets you create and preview frame‑based LED animations before sending them to SpotLED hardware via BLE. I have 
+
+## Disclaimer
+Notice! This library is not affilated with the creator of this product.
 
 ## Features
 - Pixel editor with drawing, erasing, clearing, and whole-frame shifting tools.
@@ -11,7 +14,9 @@ Animation editor for Chinese SpotLED displays. The app lets you create and previ
 - PNG monochrome image importing.
 - Animation options for built-in SpotLED effects and playback speed.
 - Text mode with optional two-line display and effect controls.
+- Custom fonts can be placed in fonts folder.
 - Project save/load to JSON files plus direct BLE upload to SpotLED devices.
+- And more…
 
 ## Technology
 - Python 3
@@ -41,6 +46,8 @@ pip install PySide6 spotled
 chmod +x ./install.sh
 sudo ./install.sh
 ```
+
+Text speed fix: https://github.com/iwalton3/python-spotled/pull/10/commits/24e319ed55382857c710baf32f2b19d71fbb8ea4
 
 ## Running
 

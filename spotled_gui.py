@@ -32,6 +32,7 @@ GRID_W, GRID_H = 48, 12
 CELL = 16
 CFG_PATH = os.path.join(os.path.expanduser("~"), ".spotled_gui.json")
 FONT_ID_BUILTIN = "__builtin__"
+DEFAULT_FONT_ID = "fonts/amstrad_cpc.slf"
 BLE_SCAN_TIMEOUT = 6
 SPOTLED_NAME_PREFIX = "SPOTLED_"
 BT_DEVICE_RE = re.compile(r"Device\s+([0-9A-Fa-f:]{17})\s+(.+)")
@@ -42,6 +43,9 @@ class Tool:
     SHIFT = 2
 
 def load_cfg():
+    def _default_font():
+        font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_FONT_ID)
+        return DEFAULT_FONT_ID if os.path.exists(font_path) else FONT_ID_BUILTIN
     if os.path.exists(CFG_PATH):
         try:
             with open(CFG_PATH, "r", encoding="utf-8") as f:
@@ -50,12 +54,13 @@ def load_cfg():
                     data["mac_history"] = []
                 if "project_dir" not in data:
                     data["project_dir"] = ""
-                if "selected_font" not in data:
-                    data["selected_font"] = FONT_ID_BUILTIN
+                selected = data.get("selected_font")
+                if not selected or selected == FONT_ID_BUILTIN:
+                    data["selected_font"] = _default_font()
                 return data
         except Exception:
             pass
-    return {"mac_history": [], "project_dir": "", "selected_font": FONT_ID_BUILTIN}
+    return {"mac_history": [], "project_dir": "", "selected_font": _default_font()}
 
 def save_cfg(cfg):
     try:
@@ -704,6 +709,7 @@ class Main(QMainWindow):
         self.cb_effect_txt = QComboBox()
         self.cb_effect_txt.addItems(["NONE","SCROLL_UP","SCROLL_DOWN","SCROLL_LEFT","SCROLL_RIGHT","STACK","EXPAND","LASER"])
         self._register_font_scaled(self.cb_effect_txt, 18, base_height=34)
+        self.cb_effect_txt.setCurrentText("SCROLL_LEFT")
         row2.addWidget(self.cb_effect_txt)
         row2.addStretch(1)
         lbl_speed_icon_txt = QLabel("🏃")
@@ -1491,9 +1497,14 @@ class Main(QMainWindow):
         self.cb_font.blockSignals(True)
         self.cb_font.clear()
         self.cb_font.addItem("built-in", FONT_ID_BUILTIN)
+        default_font = None
         for font_id in sorted(self._font_specs.keys()):
             spec = self._font_specs[font_id]
             self.cb_font.addItem(spec["name"], font_id)
+            if default_font is None and spec["name"].lower().startswith("amstrad cpc"):
+                default_font = font_id
+        if self.cfg.get("selected_font") == FONT_ID_BUILTIN and default_font:
+            current_choice = default_font
         self.cb_font.blockSignals(False)
         idx = self.cb_font.findData(current_choice)
         if idx < 0:
@@ -1779,7 +1790,7 @@ class Main(QMainWindow):
 
             text_data = data.get("text", {})
             self.le_text.setText(text_data.get("content", ""))
-            self._set_combo_value(self.cb_effect_txt, text_data.get("effect", "NONE"))
+            self._set_combo_value(self.cb_effect_txt, text_data.get("effect", "SCROLL_LEFT"))
             txt_speed = int(text_data.get("speed", 100))
             self.sl_speed_txt.setValue(min(3500, max(1, txt_speed)))
             self.chk_two_lines.setChecked(bool(text_data.get("two_lines", False)))
