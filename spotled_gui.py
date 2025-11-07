@@ -33,6 +33,7 @@ CELL = 16
 CFG_PATH = os.path.join(os.path.expanduser("~"), ".spotled_gui.json")
 FONT_ID_BUILTIN = "__builtin__"
 DEFAULT_FONT_ID = "fonts/amstrad_cpc.slf"
+DEFAULT_UI_SCALE_IDX = 2
 BLE_SCAN_TIMEOUT = 6
 SPOTLED_NAME_PREFIX = "SPOTLED_"
 BT_DEVICE_RE = re.compile(r"Device\s+([0-9A-Fa-f:]{17})\s+(.+)")
@@ -57,10 +58,12 @@ def load_cfg():
                 selected = data.get("selected_font")
                 if not selected or selected == FONT_ID_BUILTIN:
                     data["selected_font"] = _default_font()
+                if "ui_scale_index" not in data or not isinstance(data["ui_scale_index"], int):
+                    data["ui_scale_index"] = DEFAULT_UI_SCALE_IDX
                 return data
         except Exception:
             pass
-    return {"mac_history": [], "project_dir": "", "selected_font": _default_font()}
+    return {"mac_history": [], "project_dir": "", "selected_font": _default_font(), "ui_scale_index": DEFAULT_UI_SCALE_IDX}
 
 def save_cfg(cfg):
     try:
@@ -514,7 +517,10 @@ class Main(QMainWindow):
             self.cb_ui_scale.setItemData(idx, scale, Qt.UserRole)
             self.cb_ui_scale.setItemData(idx, font_factor, Qt.UserRole + 1)
             self.cb_ui_scale.setItemData(idx, slider_factor, Qt.UserRole + 2)
-        self.cb_ui_scale.setCurrentIndex(2)
+        saved_scale_idx = self.cfg.get("ui_scale_index", DEFAULT_UI_SCALE_IDX)
+        if not (0 <= saved_scale_idx < self.cb_ui_scale.count()):
+            saved_scale_idx = DEFAULT_UI_SCALE_IDX
+        self.cb_ui_scale.setCurrentIndex(saved_scale_idx)
         self.cb_ui_scale.currentIndexChanged.connect(self._change_ui_scale_preset)
         self._register_font_scaled(self.cb_ui_scale, 16, base_height=30)
         scale_row.addWidget(self.cb_ui_scale)
@@ -962,6 +968,9 @@ class Main(QMainWindow):
         slider_factor = self.cb_ui_scale.itemData(index, Qt.UserRole + 2)
         if scale is None or font_factor is None or slider_factor is None:
             return
+        if self.cfg.get("ui_scale_index") != index:
+            self.cfg["ui_scale_index"] = index
+            save_cfg(self.cfg)
         self._current_scale_label = self.cb_ui_scale.itemText(index)
         self._change_ui_scale(float(scale), float(font_factor), float(slider_factor))
 
