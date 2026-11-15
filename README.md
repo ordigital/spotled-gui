@@ -1,5 +1,7 @@
 # SpotLED GUI
 
+## [SPOTLED-GUI PROJECT WAS REPLACED BY SPOTLED-ANDROID](https://github.com/ordigital/spotled-android)
+
 ![SpotLED GUI preview](spotled_gui.png)
 
 Animation editor for Chinese SpotLED displays. The app lets you create and preview frame‑based LED animations before sending them to SpotLED hardware via BLE.
